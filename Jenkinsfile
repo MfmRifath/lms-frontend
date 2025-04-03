@@ -141,8 +141,11 @@ pipeline {
                     fi
                     
                     # Build Docker image
-                    # Make sure Dockerfile exists
-                    if [ ! -f Dockerfile ]; then
+                    # Case sensitivity fix: Check for both Dockerfile and DockerFile
+                    if [ ! -f Dockerfile ] && [ -f DockerFile ]; then
+                        echo "Found 'DockerFile' but Docker requires 'Dockerfile'. Creating symlink..."
+                        cp DockerFile Dockerfile
+                    elif [ ! -f Dockerfile ] && [ ! -f DockerFile ]; then
                         echo "Dockerfile not found. Creating Dockerfile..."
                         echo 'FROM nginx:1.24.0-alpine
                         
@@ -154,7 +157,15 @@ EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]' > Dockerfile
                         
                         echo "Dockerfile created."
+                    fi
+                    
+                    # Verify Dockerfile exists
+                    if [ -f Dockerfile ]; then
+                        echo "Dockerfile content:"
                         cat Dockerfile
+                    else
+                        echo "ERROR: Dockerfile still not found!"
+                        exit 1
                     fi
                     
                     # Verify nginx config exists
