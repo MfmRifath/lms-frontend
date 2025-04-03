@@ -4,6 +4,7 @@ pipeline {
     environment {
         DOCKER_HUB_CREDS = credentials('docker-registry-credentials')
         FRONTEND_IMAGE = 'rifathmfm/lms-frontend:latest'
+        PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env.PATH}"
     }
     
     stages {
@@ -16,6 +17,10 @@ pipeline {
         stage('Verify Tools') {
             steps {
                 sh '''
+                    # Check PATH and environment
+                    echo "Current PATH: $PATH"
+                    echo "Current user: $(id)"
+                    
                     # Check if nodejs and npm are installed
                     echo "Node.js version:"
                     node -v || echo "Node.js not installed"
@@ -24,7 +29,14 @@ pipeline {
                     npm -v || echo "npm not installed"
                     
                     echo "Docker version:"
-                    docker -v || echo "Docker not installed"
+                    docker -v || echo "Docker not found in PATH"
+                    
+                    # Check common Docker locations
+                    [ -x "/usr/local/bin/docker" ] && echo "Docker found at /usr/local/bin/docker" || echo "No Docker at /usr/local/bin"
+                    [ -x "/opt/homebrew/bin/docker" ] && echo "Docker found at /opt/homebrew/bin/docker" || echo "No Docker at /opt/homebrew/bin"
+                    
+                    # Check Docker socket
+                    ls -la /var/run/docker.sock 2>/dev/null || echo "Docker socket not found or not accessible"
                 '''
             }
         }
@@ -88,6 +100,22 @@ pipeline {
         stage('Build') {
             steps {
                 sh '''
+                    # Find Docker command
+                    DOCKER_CMD=""
+                    if command -v docker &> /dev/null; then
+                        DOCKER_CMD="docker"
+                    elif [ -x "/usr/local/bin/docker" ]; then
+                        DOCKER_CMD="/usr/local/bin/docker"
+                    elif [ -x "/opt/homebrew/bin/docker" ]; then
+                        DOCKER_CMD="/opt/homebrew/bin/docker"
+                    else
+                        echo "Docker not found in common locations, please verify installation"
+                        echo "Searched in PATH, /usr/local/bin, and /opt/homebrew/bin"
+                        exit 1
+                    fi
+                    
+                    echo "Using Docker command: $DOCKER_CMD"
+                    
                     # Run the build script from package.json (or skip if npm not installed)
                     if command -v npm &> /dev/null; then
                         npm run build
@@ -95,13 +123,9 @@ pipeline {
                         echo "Skipping npm build, using static files in public/ directory"
                     fi
                     
-                    # Build Docker image if Docker is installed
-                    if command -v docker &> /dev/null; then
-                        docker build -t ${FRONTEND_IMAGE} .
-                    else
-                        echo "Docker not installed, skipping image build"
-                        exit 1
-                    fi
+                    # Build Docker image
+                    echo "Building Docker image: ${FRONTEND_IMAGE}"
+                    $DOCKER_CMD build -t ${FRONTEND_IMAGE} .
                 '''
             }
         }
@@ -109,15 +133,30 @@ pipeline {
         stage('Deploy') {
             steps {
                 sh '''
-                    # Push to Docker Hub if Docker is installed
+                    # Find Docker command (same as in Build stage)
+                    DOCKER_CMD=""
                     if command -v docker &> /dev/null; then
-                        echo ${DOCKER_HUB_CREDS_PSW} | docker login -u ${DOCKER_HUB_CREDS_USR} --password-stdin
-                        docker push ${FRONTEND_IMAGE}
-                        docker logout
+                        DOCKER_CMD="docker"
+                    elif [ -x "/usr/local/bin/docker" ]; then
+                        DOCKER_CMD="/usr/local/bin/docker"
+                    elif [ -x "/opt/homebrew/bin/docker" ]; then
+                        DOCKER_CMD="/opt/homebrew/bin/docker"
                     else
-                        echo "Docker not installed, skipping deployment"
+                        echo "Docker not found in common locations, please verify installation"
                         exit 1
                     fi
+                    
+                    echo "Using Docker command: $DOCKER_CMD"
+                    
+                    # Push to Docker Hub
+                    echo "Logging in to Docker Hub as ${DOCKER_HUB_CREDS_USR}"
+                    echo ${DOCKER_HUB_CREDS_PSW} | $DOCKER_CMD login -u ${DOCKER_HUB_CREDS_USR} --password-stdin
+                    
+                    echo "Pushing image: ${FRONTEND_IMAGE}"
+                    $DOCKER_CMD push ${FRONTEND_IMAGE}
+                    
+                    echo "Logging out from Docker Hub"
+                    $DOCKER_CMD logout
                 '''
             }
         }
