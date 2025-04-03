@@ -142,8 +142,8 @@ pipeline {
                     
                     # Build Docker image
                     # Case sensitivity fix - create a completely new dockerfile with a different approach
-                    # Force create a new lowercase Dockerfile regardless of what exists
-                    echo "# Generated Dockerfile for Docker build" > dockerfile.new
+                    # Force create a new lowercase DockerFile regardless of what exists
+                    echo "# Generated DockerFile for Docker build" > dockerfile.new
                     echo "FROM nginx:1.24.0-alpine" >> dockerfile.new
                     echo "" >> dockerfile.new
                     echo "COPY public /usr/share/nginx/html" >> dockerfile.new
@@ -154,14 +154,14 @@ pipeline {
                     echo 'CMD ["nginx", "-g", "daemon off;"]' >> dockerfile.new
                     
                     # Move the new file to Dockerfile (this should work on macOS)
-                    mv dockerfile.new Dockerfile
+                    mv dockerfile.new DockerFile
                     
-                    echo "Created fresh Dockerfile with contents:"
-                    cat Dockerfile
+                    echo "Created fresh DockerFile with contents:"
+                    cat DockerFile
                     
                     # For debugging, check if Docker can see the file
                     echo "Docker file existence check:"
-                    $DOCKER_CMD run --rm -v "$PWD:/check" alpine:latest ls -la /check/Dockerfile || echo "Docker cannot see Dockerfile"
+                    $DOCKER_CMD run --rm -v "$PWD:/check" alpine:latest ls -la /check/DockerFile || echo "Docker cannot see DockerFile"
                     
                     # Verify nginx config exists
                     if [ ! -f nginx/conf.d/default.conf ]; then
@@ -191,7 +191,7 @@ pipeline {
                     
                     # Build Docker image
                     echo "Building Docker image: ${FRONTEND_IMAGE}"
-                    $DOCKER_CMD build -f Dockerfile -t ${FRONTEND_IMAGE} .
+                    $DOCKER_CMD build -f DockerFile -t ${FRONTEND_IMAGE} .
                 '''
             }
         }
