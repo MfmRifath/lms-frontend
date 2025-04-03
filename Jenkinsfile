@@ -341,52 +341,18 @@ EOF
         stage('Setup Ansible') {
             steps {
                 sh '''
-                    # Install Ansible if not already installed
-                    if ! command -v ansible &> /dev/null; then
-                        echo "Installing Ansible..."
-                        if command -v apt-get &> /dev/null; then
-                            sudo apt-get update
-                            sudo apt-get install -y ansible
-                        elif command -v yum &> /dev/null; then
-                            sudo yum install -y ansible
-                        elif command -v brew &> /dev/null; then
-                            brew install ansible
-                        else
-                            echo "Could not find a package manager to install Ansible"
-                            echo "Please install Ansible manually and rerun the pipeline"
-                            exit 1
-                        fi
-                    fi
-                    
                     # Create Ansible directory structure
                     mkdir -p ansible/inventory
                     
-                    # Create ansible.cfg for connection settings
-                    cat > ansible/ansible.cfg <<'EOF'
-[defaults]
-host_key_checking = False
-timeout = 120
-retry_files_enabled = False
-stdout_callback = yaml
-interpreter_python = auto_silent
-
-[ssh_connection]
-ssh_args = -o ControlMaster=auto -o ControlPersist=60s -o ConnectTimeout=60 -o ConnectionAttempts=20
-pipelining = True
-control_path = /tmp/ansible-ssh-%%h-%%p-%%r
-retries = 10
-EOF
-                    
-                    # Create inventory file with the exact configuration provided
+                    # Create inventory file with EC2 instance
                     cat > ansible/inventory/hosts <<'EOF'
 [ec2_instances]
 ec2-13-218-208-239.compute-1.amazonaws.com ansible_user=ec2-user ansible_ssh_private_key_file=${WORKSPACE}/ssh_key ansible_connection=ssh
-
 [ec2_instances:vars]
 ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPersist=60s -o ConnectTimeout=30 -o ConnectionAttempts=20'
 EOF
                     
-                    # Replace ${WORKSPACE} with actual workspace path
+                    # Fix the WORKSPACE variable in inventory file
                     sed -i "s|\${WORKSPACE}|${WORKSPACE}|g" ansible/inventory/hosts
                     
                     echo "Ansible inventory created:"
