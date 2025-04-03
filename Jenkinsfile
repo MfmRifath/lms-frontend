@@ -118,7 +118,24 @@ pipeline {
                     
                     # Run the build script from package.json (or skip if npm not installed)
                     if command -v npm &> /dev/null; then
-                        npm run build
+                        echo "Installing npm dependencies..."
+                        npm ci || npm install  # Faster CI install if package-lock.json exists
+                        
+                        # Check if we're using a React app that needs build
+                        if grep -q "react-scripts" package.json; then
+                            echo "Building React application..."
+                            npm run build
+                            
+                            # If build succeeded, copy build files to public directory for Docker
+                            if [ -d "build" ]; then
+                                echo "Copying React build output to public directory..."
+                                rm -rf public/*
+                                cp -r build/* public/
+                            fi
+                        else
+                            echo "Running standard build script..."
+                            npm run build
+                        fi
                     else
                         echo "Skipping npm build, using static files in public/ directory"
                     fi
