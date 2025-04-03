@@ -141,32 +141,27 @@ pipeline {
                     fi
                     
                     # Build Docker image
-                    # Case sensitivity fix: Check for both Dockerfile and DockerFile
-                    if [ ! -f Dockerfile ] && [ -f DockerFile ]; then
-                        echo "Found 'DockerFile' but Docker requires 'Dockerfile'. Creating symlink..."
-                        cp DockerFile Dockerfile
-                    elif [ ! -f Dockerfile ] && [ ! -f DockerFile ]; then
-                        echo "Dockerfile not found. Creating Dockerfile..."
-                        echo 'FROM nginx:1.24.0-alpine
-                        
-COPY public /usr/share/nginx/html
-COPY nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf
-
-EXPOSE 80
-
-CMD ["nginx", "-g", "daemon off;"]' > Dockerfile
-                        
-                        echo "Dockerfile created."
-                    fi
+                    # Case sensitivity fix - create a completely new dockerfile with a different approach
+                    # Force create a new lowercase Dockerfile regardless of what exists
+                    echo "# Generated Dockerfile for Docker build" > dockerfile.new
+                    echo "FROM nginx:1.24.0-alpine" >> dockerfile.new
+                    echo "" >> dockerfile.new
+                    echo "COPY public /usr/share/nginx/html" >> dockerfile.new
+                    echo "COPY nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf" >> dockerfile.new
+                    echo "" >> dockerfile.new
+                    echo "EXPOSE 80" >> dockerfile.new
+                    echo "" >> dockerfile.new
+                    echo 'CMD ["nginx", "-g", "daemon off;"]' >> dockerfile.new
                     
-                    # Verify Dockerfile exists
-                    if [ -f Dockerfile ]; then
-                        echo "Dockerfile content:"
-                        cat Dockerfile
-                    else
-                        echo "ERROR: Dockerfile still not found!"
-                        exit 1
-                    fi
+                    # Move the new file to Dockerfile (this should work on macOS)
+                    mv dockerfile.new Dockerfile
+                    
+                    echo "Created fresh Dockerfile with contents:"
+                    cat Dockerfile
+                    
+                    # For debugging, check if Docker can see the file
+                    echo "Docker file existence check:"
+                    $DOCKER_CMD run --rm -v "$PWD:/check" alpine:latest ls -la /check/Dockerfile || echo "Docker cannot see Dockerfile"
                     
                     # Verify nginx config exists
                     if [ ! -f nginx/conf.d/default.conf ]; then
@@ -196,7 +191,7 @@ CMD ["nginx", "-g", "daemon off;"]' > Dockerfile
                     
                     # Build Docker image
                     echo "Building Docker image: ${FRONTEND_IMAGE}"
-                    $DOCKER_CMD build -t ${FRONTEND_IMAGE} .
+                    $DOCKER_CMD build -f Dockerfile -t ${FRONTEND_IMAGE} .
                 '''
             }
         }
