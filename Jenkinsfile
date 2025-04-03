@@ -332,7 +332,7 @@ EOF
         stage('Provision EC2 with Terraform') {
             steps {
                 withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', 
-                                 credentialsId: 'aws-credentials',
+                                 credentialsId: 'aws-credential',
                                  accessKeyVariable: 'AWS_ACCESS_KEY_ID', 
                                  secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
                     sh '''
