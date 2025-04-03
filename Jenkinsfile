@@ -141,6 +141,49 @@ pipeline {
                     fi
                     
                     # Build Docker image
+                    # Make sure Dockerfile exists
+                    if [ ! -f Dockerfile ]; then
+                        echo "Dockerfile not found. Creating Dockerfile..."
+                        echo 'FROM nginx:1.24.0-alpine
+                        
+COPY public /usr/share/nginx/html
+COPY nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]' > Dockerfile
+                        
+                        echo "Dockerfile created."
+                        cat Dockerfile
+                    fi
+                    
+                    # Verify nginx config exists
+                    if [ ! -f nginx/conf.d/default.conf ]; then
+                        echo "Nginx config not found. Creating config..."
+                        mkdir -p nginx/conf.d
+                        echo 'server {
+    listen 80;
+    server_name localhost;
+    
+    root /usr/share/nginx/html;
+    index index.html;
+    
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}' > nginx/conf.d/default.conf
+                        
+                        echo "Nginx config created."
+                    fi
+                    
+                    # List files to verify
+                    echo "Content of current directory:"
+                    ls -la
+                    
+                    echo "Content of public directory:"
+                    ls -la public || echo "Public directory not found"
+                    
+                    # Build Docker image
                     echo "Building Docker image: ${FRONTEND_IMAGE}"
                     $DOCKER_CMD build -t ${FRONTEND_IMAGE} .
                 '''
