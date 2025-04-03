@@ -3,7 +3,7 @@ pipeline {
     
     environment {
         DOCKER_HUB_CREDS = credentials('docker-registry-credentials')
-        AWS_CREDS = credentials('aws-credentials')
+        AWS_CREDS = credentials('aaws-credential')
         FRONTEND_IMAGE = 'rifathmfm/lms-frontend:latest'
         PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env.PATH}"
         TF_VAR_public_key_path = "${env.WORKSPACE}/ssh_key.pub"
