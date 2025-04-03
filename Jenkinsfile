@@ -3,7 +3,8 @@ pipeline {
     
     environment {
         DOCKER_HUB_CREDS = credentials('docker-registry-credentials')
-        AWS_CREDS = credentials('aws-credential')
+        AWS_ACCESS_KEY_ID = credentials('aws-credentials-id')
+        AWS_SECRET_ACCESS_KEY = credentials('aws-credentials-secret')
         FRONTEND_IMAGE = 'rifathmfm/lms-frontend:latest'
         PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env.PATH}"
         TF_VAR_public_key_path = "${env.WORKSPACE}/ssh_key.pub"
@@ -86,8 +87,9 @@ pipeline {
                         }
                     }' > nginx/conf.d/default.conf
                     
-                    # Generate SSH key pair for EC2 access
-                    ssh-keygen -t rsa -b 2048 -f ssh_key -N ""
+                    # Generate SSH key pair for EC2 access - FORCE OVERWRITE
+                    rm -f ssh_key ssh_key.pub
+                    ssh-keygen -t rsa -b 2048 -f ssh_key -N "" -q
                     
                     # Create Terraform directory
                     mkdir -p terraform
@@ -265,32 +267,6 @@ EOF
                     echo "Created workspace Dockerfile with contents:"
                     cat dockerfile.nginx
                     
-                    # Verify nginx config exists
-                    if [ ! -f nginx/conf.d/default.conf ]; then
-                        echo "Nginx config not found. Creating config..."
-                        mkdir -p nginx/conf.d
-                        echo 'server {
-    listen 80;
-    server_name localhost;
-    
-    root /usr/share/nginx/html;
-    index index.html;
-    
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-}' > nginx/conf.d/default.conf
-                        
-                        echo "Nginx config created."
-                    fi
-                    
-                    # List files to verify
-                    echo "Content of current directory:"
-                    ls -la
-                    
-                    echo "Content of public directory:"
-                    ls -la public || echo "Public directory not found"
-                    
                     # Build Docker image with explicit dockerfile path
                     echo "Building Docker image: ${FRONTEND_IMAGE}"
                     $DOCKER_CMD build -f dockerfile.nginx -t ${FRONTEND_IMAGE} .
@@ -331,35 +307,30 @@ EOF
         
         stage('Provision EC2 with Terraform') {
             steps {
-                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', 
-                                 credentialsId: 'aws-credential',
-                                 accessKeyVariable: 'AWS_ACCESS_KEY_ID', 
-                                 secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
-                    sh '''
-                        cd terraform
-                        
-                        # Initialize Terraform
-                        terraform init
-                        
-                        # Plan the deployment
-                        terraform plan -out=tfplan -var "public_key_path=${TF_VAR_public_key_path}"
-                        
-                        # Apply the Terraform configuration
-                        terraform apply -auto-approve tfplan
-                        
-                        # Extract the EC2 instance information for later use
-                        echo "$(terraform output -json)" > ../terraform_output.json
-                        
-                        # Extract the public DNS for SSH access
-                        EC2_DNS=$(terraform output -raw ec2_instance_dns)
-                        EC2_IP=$(terraform output -raw ec2_instance_ip)
-                        
-                        echo "EC2_DNS=${EC2_DNS}" > ../ec2_info.properties
-                        echo "EC2_IP=${EC2_IP}" >> ../ec2_info.properties
-                        
-                        echo "EC2 Instance provisioned at: ${EC2_DNS}"
-                    '''
-                }
+                sh '''
+                    cd terraform
+                    
+                    # Initialize Terraform
+                    terraform init
+                    
+                    # Plan the deployment
+                    terraform plan -out=tfplan -var "public_key_path=${TF_VAR_public_key_path}"
+                    
+                    # Apply the Terraform configuration
+                    terraform apply -auto-approve tfplan
+                    
+                    # Extract the EC2 instance information for later use
+                    echo "$(terraform output -json)" > ../terraform_output.json
+                    
+                    # Extract the public DNS for SSH access
+                    EC2_DNS=$(terraform output -raw ec2_instance_dns)
+                    EC2_IP=$(terraform output -raw ec2_instance_ip)
+                    
+                    echo "EC2_DNS=${EC2_DNS}" > ../ec2_info.properties
+                    echo "EC2_IP=${EC2_IP}" >> ../ec2_info.properties
+                    
+                    echo "EC2 Instance provisioned at: ${EC2_DNS}"
+                '''
             }
         }
         
