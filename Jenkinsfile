@@ -4,7 +4,7 @@ pipeline {
     environment {
         DOCKER_HUB_CREDS = credentials('docker-registry-credentials')
         AWS_CREDS = credentials('aws-credentials')
-        EC2_SSH_KEY = credentials('ec2-ssh-key')
+        EC2_SSH_KEY = credentials('aws-ssh-key')
         EC2_IP = '${params.EC2_IP}'
         DOCKER_BACKEND_IMAGE = 'rifathmfm/lms-backend:${BUILD_NUMBER}'
         DOCKER_FRONTEND_IMAGE = 'rifathmfm/lms-frontend:${BUILD_NUMBER}'
