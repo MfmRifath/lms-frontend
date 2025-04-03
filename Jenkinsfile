@@ -368,40 +368,26 @@ EOF
         }
         
         stage('Deploy to EC2') {
-            steps {
-                sh '''
-                    # Load EC2 info from properties file
-                    source ec2_info.properties
-                    
-                    # Create deployment script
-                    cat > deploy.sh <<EOL
+    steps {
+        sh '''
+            # Load EC2 info from properties file
+            source ec2_info.properties
+            
+            # Create a simplified deployment script
+            cat > deploy.sh <<'EOFMARKER'
 #!/bin/bash
 
-# Wait for Docker to be available (sometimes it takes a moment after user-data)
-echo "Waiting for Docker to be available..."
-attempt=1
-max_attempts=10
-while [ \$attempt -le \$max_attempts ]; do
-    echo "Attempt \$attempt of \$max_attempts: Checking Docker..."
-    if sudo docker version &>/dev/null; then
-        echo "Docker is ready!"
-        break
-    fi
-    echo "Docker not ready yet, waiting 10 seconds..."
-    sleep 10
-    attempt=\$((attempt + 1))
-done
+# Force Docker installation immediately without waiting
+echo "Installing Docker directly..."
+sudo yum update -y
+sudo amazon-linux-extras install docker -y
+sudo service docker start
+sudo systemctl enable docker
+sudo usermod -a -G docker ec2-user
 
-if [ \$attempt -gt \$max_attempts ]; then
-    echo "Docker not available after \$max_attempts attempts."
-    echo "Installing Docker manually..."
-    sudo yum update -y
-    sudo amazon-linux-extras install docker -y
-    sudo service docker start
-    sudo systemctl enable docker
-    sudo usermod -a -G docker ec2-user
-    # Need to reconnect for group changes to take effect, but we'll use sudo for now
-fi
+# Add a bit of delay for Docker to fully start
+echo "Waiting for Docker to start..."
+sleep 30
 
 # Pull the latest image
 echo "Pulling latest image: ${FRONTEND_IMAGE}"
@@ -420,17 +406,20 @@ sudo docker run -d --name lms-frontend \\
   ${FRONTEND_IMAGE}
 
 echo "Deployment completed successfully!"
-EOL
-                    
-                    # Copy and execute deployment script
-                    scp -o StrictHostKeyChecking=no -i ssh_key deploy.sh ec2-user@${EC2_DNS}:~/
-                    ssh -o StrictHostKeyChecking=no -i ssh_key ec2-user@${EC2_DNS} "chmod +x ~/deploy.sh && ~/deploy.sh"
-                    
-                    echo "EC2 deployment completed successfully!"
-                    echo "Application is now available at: http://${EC2_DNS}"
-                '''
-            }
-        }
+EOFMARKER
+
+            # Update the FRONTEND_IMAGE value in the script
+            sed -i "s|\\${FRONTEND_IMAGE}|${FRONTEND_IMAGE}|g" deploy.sh
+            
+            # Copy and execute deployment script
+            scp -o StrictHostKeyChecking=no -i ssh_key deploy.sh ec2-user@${EC2_DNS}:~/
+            ssh -o StrictHostKeyChecking=no -i ssh_key ec2-user@${EC2_DNS} "chmod +x ~/deploy.sh && ~/deploy.sh"
+            
+            echo "EC2 deployment completed successfully!"
+            echo "Application is now available at: http://${EC2_DNS}"
+        '''
+    }
+}
     }
     
     post {
