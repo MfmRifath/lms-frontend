@@ -394,7 +394,7 @@ EOL
         failure {
             echo """
             =======================================
-            Deployment failed! Check the logs for details.
+            Deployment failed! Check the logs for detail.
             =======================================
             """
         }
