@@ -9,6 +9,7 @@ pipeline {
         PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env.PATH}"
         TF_VAR_public_key_path = "${env.WORKSPACE}/ssh_key.pub"
         EC2_USER = "ec2-user"
+        EC2_DNS = "ec2-13-218-208-239.compute-1.amazonaws.com"
     }
     
     stages {
@@ -344,11 +345,10 @@ EOF
                     # Create Ansible directory structure
                     mkdir -p ansible/inventory
                     
-                    # First create the inventory file with the workspace path already expanded
-                    # This avoids needing to use sed on macOS
+                    # Create inventory file with the fixed EC2 instance info
                     cat > ansible/inventory/hosts <<EOF
 [ec2_instances]
-ec2-13-218-208-239.compute-1.amazonaws.com ansible_user=ec2-user ansible_ssh_private_key_file=${WORKSPACE}/ssh_key ansible_connection=ssh
+${EC2_DNS} ansible_user=${EC2_USER} ansible_ssh_private_key_file=${WORKSPACE}/ssh_key ansible_connection=ssh
 [ec2_instances:vars]
 ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPersist=60s -o ConnectTimeout=30 -o ConnectionAttempts=20'
 EOF
@@ -356,7 +356,7 @@ EOF
                     echo "Ansible inventory created:"
                     cat ansible/inventory/hosts
                     
-                    # Create ansible.cfg for connection settings
+                    # Create ansible.cfg
                     cat > ansible/ansible.cfg <<EOF
 [defaults]
 host_key_checking = False
@@ -488,7 +488,7 @@ EOF
                     # Set permissions on SSH key
                     chmod 400 ssh_key
                     
-                    # Verify ansible directory structure and files exist
+                    # Verify ansible files exist
                     ls -la ansible/
                     ls -la ansible/inventory/
                     cat ansible/inventory/hosts
@@ -496,12 +496,12 @@ EOF
                     # Check if Ansible inventory is valid
                     cd ansible && ansible-inventory -i inventory/hosts --list
                     
-                    # Run the Ansible playbook with retries and increased verbosity
-                    cd ansible && ansible-playbook -i inventory/hosts deploy.yml -v
+                    # Run the Ansible playbook (without changing directory again)
+                    ansible-playbook -i inventory/hosts deploy.yml -v
                     
                     # Print success message
                     echo "Deployment completed successfully via Ansible!"
-                    echo "Application is now available at: http://ec2-13-218-208-239.compute-1.amazonaws.com"
+                    echo "Application is now available at: http://${EC2_DNS}"
                 '''
             }
         }
@@ -519,8 +519,8 @@ EOF
                 Frontend deployment completed successfully!
                 ---------------------------------------
                 Frontend Image: ${FRONTEND_IMAGE}
-                EC2 Instance DNS: ec2-13-218-208-239.compute-1.amazonaws.com
-                Application URL: http://ec2-13-218-208-239.compute-1.amazonaws.com
+                EC2 Instance DNS: ${EC2_DNS}
+                Application URL: http://${EC2_DNS}
                 =======================================
                 """
             '''
