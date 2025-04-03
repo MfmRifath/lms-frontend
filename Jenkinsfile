@@ -21,7 +21,7 @@ pipeline {
         stage('Verify Tools') {
             steps {
                 sh '''
-                    # Check PATH and environment
+                    #Check PATH and environment
                     echo "Current PATH: $PATH"
                     echo "Current user: $(id)"
                     
