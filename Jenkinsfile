@@ -3,8 +3,8 @@ pipeline {
     
     environment {
         DOCKER_HUB_CREDS = credentials('docker-registry-credentials')
-        AWS_ACCESS_KEY_ID = credentials('aws-access-key-id')
-        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
+        AWS_ACCESS_KEY_ID = credentials('aws-credentials-id')
+        AWS_SECRET_ACCESS_KEY = credentials('aws-credentials-secret')
         FRONTEND_IMAGE = 'rifathmfm/lms-frontend:latest'
         PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env.PATH}"
         TF_VAR_public_key_path = "${env.WORKSPACE}/ssh_key.pub"
@@ -368,13 +368,13 @@ EOF
         }
         
         stage('Deploy to EC2') {
-    steps {
-        sh '''
-            # Load EC2 info from properties file
-            source ec2_info.properties
-            
-            # Create a simplified deployment script
-            cat > deploy.sh <<'EOFMARKER'
+            steps {
+                sh '''
+                    # Load EC2 info from properties file
+                    source ec2_info.properties
+                    
+                    # Create a simplified deployment script
+                    cat > deploy.sh <<'EOFMARKER'
 #!/bin/bash
 
 # Force Docker installation immediately without waiting
@@ -390,8 +390,8 @@ echo "Waiting for Docker to start..."
 sleep 30
 
 # Pull the latest image
-echo "Pulling latest image: ${FRONTEND_IMAGE}"
-sudo docker pull ${FRONTEND_IMAGE}
+echo "Pulling latest image: DOCKER_IMAGE_PLACEHOLDER"
+sudo docker pull DOCKER_IMAGE_PLACEHOLDER
 
 # Stop and remove any existing container
 echo "Stopping existing container..."
@@ -403,23 +403,23 @@ echo "Starting new container..."
 sudo docker run -d --name lms-frontend \\
   -p 80:80 \\
   --restart unless-stopped \\
-  ${FRONTEND_IMAGE}
+  DOCKER_IMAGE_PLACEHOLDER
 
 echo "Deployment completed successfully!"
 EOFMARKER
 
-            # Update the FRONTEND_IMAGE value in the script
-            sed -i "s|\\${FRONTEND_IMAGE}|${FRONTEND_IMAGE}|g" deploy.sh
-            
-            # Copy and execute deployment script
-            scp -o StrictHostKeyChecking=no -i ssh_key deploy.sh ec2-user@${EC2_DNS}:~/
-            ssh -o StrictHostKeyChecking=no -i ssh_key ec2-user@${EC2_DNS} "chmod +x ~/deploy.sh && ~/deploy.sh"
-            
-            echo "EC2 deployment completed successfully!"
-            echo "Application is now available at: http://${EC2_DNS}"
-        '''
-    }
-}
+                    # Update the FRONTEND_IMAGE value in the script
+                    sed -i "s|DOCKER_IMAGE_PLACEHOLDER|${FRONTEND_IMAGE}|g" deploy.sh
+                    
+                    # Copy and execute deployment script
+                    scp -o StrictHostKeyChecking=no -i ssh_key deploy.sh ec2-user@${EC2_DNS}:~/
+                    ssh -o StrictHostKeyChecking=no -i ssh_key ec2-user@${EC2_DNS} "chmod +x ~/deploy.sh && ~/deploy.sh"
+                    
+                    echo "EC2 deployment completed successfully!"
+                    echo "Application is now available at: http://${EC2_DNS}"
+                '''
+            }
+        }
     }
     
     post {
