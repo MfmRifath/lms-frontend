@@ -21,7 +21,7 @@ pipeline {
         stage('Verify Tools') {
             steps {
                 sh '''
-                    #Check PATH and environment
+                    # Check PATH and environment
                     echo "Current PATH: $PATH"
                     echo "Current user: $(id)"
                     
@@ -344,19 +344,32 @@ EOF
                     # Create Ansible directory structure
                     mkdir -p ansible/inventory
                     
-                    # Create inventory file with EC2 instance
-                    cat > ansible/inventory/hosts <<'EOF'
+                    # First create the inventory file with the workspace path already expanded
+                    # This avoids needing to use sed on macOS
+                    cat > ansible/inventory/hosts <<EOF
 [ec2_instances]
 ec2-13-218-208-239.compute-1.amazonaws.com ansible_user=ec2-user ansible_ssh_private_key_file=${WORKSPACE}/ssh_key ansible_connection=ssh
 [ec2_instances:vars]
 ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPersist=60s -o ConnectTimeout=30 -o ConnectionAttempts=20'
 EOF
                     
-                    # Fix the WORKSPACE variable in inventory file
-                    sed -i "s|\${WORKSPACE}|${WORKSPACE}|g" ansible/inventory/hosts
-                    
                     echo "Ansible inventory created:"
                     cat ansible/inventory/hosts
+                    
+                    # Create ansible.cfg for connection settings
+                    cat > ansible/ansible.cfg <<EOF
+[defaults]
+host_key_checking = False
+timeout = 120
+retry_files_enabled = False
+stdout_callback = yaml
+interpreter_python = auto_silent
+
+[ssh_connection]
+ssh_args = -o ControlMaster=auto -o ControlPersist=60s -o ConnectTimeout=60 -o ConnectionAttempts=20
+pipelining = True
+retries = 10
+EOF
                     
                     # Create Ansible playbook for deployment
                     cat > ansible/deploy.yml <<EOF
@@ -474,6 +487,11 @@ EOF
                     
                     # Set permissions on SSH key
                     chmod 400 ssh_key
+                    
+                    # Verify ansible directory structure and files exist
+                    ls -la ansible/
+                    ls -la ansible/inventory/
+                    cat ansible/inventory/hosts
                     
                     # Check if Ansible inventory is valid
                     cd ansible && ansible-inventory -i inventory/hosts --list
