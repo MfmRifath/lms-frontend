@@ -40,6 +40,9 @@ pipeline {
                     
                     # Check AWS CLI version
                     aws --version || echo "AWS CLI not installed"
+                    
+                    # Check Ansible version
+                    ansible --version || echo "Ansible not installed"
                 '''
             }
         }
@@ -90,6 +93,7 @@ pipeline {
                     # Generate SSH key pair for EC2 access - FORCE OVERWRITE
                     rm -f ssh_key ssh_key.pub
                     ssh-keygen -t rsa -b 2048 -f ssh_key -N "" -q
+                    chmod 400 ssh_key
                     
                     # Create Terraform directory
                     mkdir -p terraform
@@ -334,89 +338,186 @@ EOF
             }
         }
         
-        stage('Wait for EC2 Readiness') {
+        stage('Setup Ansible') {
             steps {
                 sh '''
-                    # Load EC2 info from properties file
-                    source ec2_info.properties
-                    
-                    echo "Waiting for EC2 instance to be ready..."
-                    
-                    # Wait for instance to be ready and SSH to be available
-                    attempt=1
-                    max_attempts=30
-                    
-                    while [ $attempt -le $max_attempts ]; do
-                        echo "Attempt $attempt of $max_attempts: Checking if EC2 instance is ready..."
-                        
-                        if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ssh_key ec2-user@${EC2_DNS} "echo 'Connection successful'" 2>/dev/null; then
-                            echo "EC2 instance is ready!"
-                            break
+                    # Install Ansible if not already installed
+                    if ! command -v ansible &> /dev/null; then
+                        echo "Installing Ansible..."
+                        if command -v apt-get &> /dev/null; then
+                            sudo apt-get update
+                            sudo apt-get install -y ansible
+                        elif command -v yum &> /dev/null; then
+                            sudo yum install -y ansible
+                        elif command -v brew &> /dev/null; then
+                            brew install ansible
+                        else
+                            echo "Could not find a package manager to install Ansible"
+                            echo "Please install Ansible manually and rerun the pipeline"
+                            exit 1
                         fi
-                        
-                        echo "EC2 instance not ready yet, waiting 10 seconds..."
-                        sleep 10
-                        attempt=$((attempt + 1))
-                    done
-                    
-                    if [ $attempt -gt $max_attempts ]; then
-                        echo "Failed to connect to EC2 instance after $max_attempts attempts."
-                        exit 1
                     fi
+                    
+                    # Create Ansible directory structure
+                    mkdir -p ansible/inventory
+                    
+                    # Create ansible.cfg for connection settings
+                    cat > ansible/ansible.cfg <<'EOF'
+[defaults]
+host_key_checking = False
+timeout = 120
+retry_files_enabled = False
+stdout_callback = yaml
+interpreter_python = auto_silent
+
+[ssh_connection]
+ssh_args = -o ControlMaster=auto -o ControlPersist=60s -o ConnectTimeout=60 -o ConnectionAttempts=20
+pipelining = True
+control_path = /tmp/ansible-ssh-%%h-%%p-%%r
+retries = 10
+EOF
+                    
+                    # Create inventory file with the exact configuration provided
+                    cat > ansible/inventory/hosts <<'EOF'
+[ec2_instances]
+ec2-13-218-208-239.compute-1.amazonaws.com ansible_user=ec2-user ansible_ssh_private_key_file=${WORKSPACE}/ssh_key ansible_connection=ssh
+
+[ec2_instances:vars]
+ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPersist=60s -o ConnectTimeout=30 -o ConnectionAttempts=20'
+EOF
+                    
+                    # Replace ${WORKSPACE} with actual workspace path
+                    sed -i "s|\${WORKSPACE}|${WORKSPACE}|g" ansible/inventory/hosts
+                    
+                    echo "Ansible inventory created:"
+                    cat ansible/inventory/hosts
+                    
+                    # Create Ansible playbook for deployment
+                    cat > ansible/deploy.yml <<EOF
+---
+- name: Wait for EC2 instance and deploy LMS Frontend
+  hosts: ec2_instances
+  become: yes
+  gather_facts: no
+  vars:
+    docker_image: ${FRONTEND_IMAGE}
+  
+  tasks:
+    - name: Wait for SSH connection
+      wait_for_connection:
+        delay: 10
+        timeout: 600
+        connect_timeout: 60
+        sleep: 15
+      retries: 30
+      delay: 30
+    
+    - name: Gather facts after SSH is available
+      setup:
+    
+    - name: Update all packages
+      yum:
+        name: '*'
+        state: latest
+        update_only: yes
+      register: update_result
+      retries: 5
+      delay: 10
+      until: update_result is succeeded
+    
+    - name: Install AWS CLI and required packages
+      yum:
+        name:
+          - amazon-linux-extras
+          - python-pip
+          - unzip
+        state: present
+      register: install_result
+      retries: 5
+      delay: 10
+      until: install_result is succeeded
+    
+    - name: Install Docker using amazon-linux-extras
+      shell: amazon-linux-extras install -y docker
+      args:
+        creates: /usr/bin/docker
+      register: docker_install
+      retries: 3
+      delay: 10
+      until: docker_install is succeeded
+    
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+      register: docker_service
+      retries: 3
+      delay: 10
+      until: docker_service is succeeded
+    
+    - name: Add ec2-user to Docker group
+      user:
+        name: ec2-user
+        groups: docker
+        append: yes
+    
+    - name: Install Docker Python module
+      pip:
+        name: docker
+        state: present
+      register: pip_install
+      retries: 3
+      delay: 5
+      until: pip_install is succeeded
+    
+    - name: Create Docker container command
+      shell: |
+        docker pull ${FRONTEND_IMAGE}
+        docker stop lms-frontend || true
+        docker rm lms-frontend || true
+        docker run -d --name lms-frontend \\
+          -p 80:80 \\
+          --restart unless-stopped \\
+          ${FRONTEND_IMAGE}
+      args:
+        executable: /bin/bash
+    
+    - name: Check HTTP service
+      uri:
+        url: "http://localhost:80/"
+        return_content: yes
+      register: webpage
+      until: webpage.status == 200
+      retries: 10
+      delay: 15
+    
+    - name: Print deployment success
+      debug:
+        msg: "LMS Frontend successfully deployed to {{ inventory_hostname }}"
+EOF
                 '''
             }
         }
         
-        stage('Deploy to EC2') {
+        stage('Deploy with Ansible') {
             steps {
                 sh '''
-                    # Load EC2 info from properties file
-                    source ec2_info.properties
+                    # Install required Ansible collections if not already installed
+                    ansible-galaxy collection install community.docker || true
                     
-                    # Create a simplified deployment script
-                    cat > deploy.sh <<'EOFMARKER'
-#!/bin/bash
-
-# Force Docker installation immediately without waiting
-echo "Installing Docker directly..."
-sudo yum update -y
-sudo amazon-linux-extras install docker -y
-sudo service docker start
-sudo systemctl enable docker
-sudo usermod -a -G docker ec2-user
-
-# Add a bit of delay for Docker to fully start
-echo "Waiting for Docker to start..."
-sleep 30
-
-# Pull the latest image
-echo "Pulling latest image: DOCKER_IMAGE_PLACEHOLDER"
-sudo docker pull DOCKER_IMAGE_PLACEHOLDER
-
-# Stop and remove any existing container
-echo "Stopping existing container..."
-sudo docker stop lms-frontend || true
-sudo docker rm lms-frontend || true
-
-# Run the new container
-echo "Starting new container..."
-sudo docker run -d --name lms-frontend \\
-  -p 80:80 \\
-  --restart unless-stopped \\
-  DOCKER_IMAGE_PLACEHOLDER
-
-echo "Deployment completed successfully!"
-EOFMARKER
-
-                    # Update the FRONTEND_IMAGE value in the script
-                    sed -i "s|DOCKER_IMAGE_PLACEHOLDER|${FRONTEND_IMAGE}|g" deploy.sh
+                    # Set permissions on SSH key
+                    chmod 400 ssh_key
                     
-                    # Copy and execute deployment script
-                    scp -o StrictHostKeyChecking=no -i ssh_key deploy.sh ec2-user@${EC2_DNS}:~/
-                    ssh -o StrictHostKeyChecking=no -i ssh_key ec2-user@${EC2_DNS} "chmod +x ~/deploy.sh && ~/deploy.sh"
+                    # Check if Ansible inventory is valid
+                    cd ansible && ansible-inventory -i inventory/hosts --list
                     
-                    echo "EC2 deployment completed successfully!"
-                    echo "Application is now available at: http://${EC2_DNS}"
+                    # Run the Ansible playbook with retries and increased verbosity
+                    cd ansible && ansible-playbook -i inventory/hosts deploy.yml -v
+                    
+                    # Print success message
+                    echo "Deployment completed successfully via Ansible!"
+                    echo "Application is now available at: http://ec2-13-218-208-239.compute-1.amazonaws.com"
                 '''
             }
         }
@@ -424,29 +525,20 @@ EOFMARKER
     
     post {
         always {
-            archiveArtifacts artifacts: 'ssh_key, ssh_key.pub, ec2_info.properties, terraform_output.json', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'ssh_key, ssh_key.pub, ec2_info.properties, terraform_output.json, ansible/**/*', allowEmptyArchive: true
         }
         
         success {
             sh '''
-                source ec2_info.properties || echo "No EC2 info available"
-                
                 echo """
                 =======================================
                 Frontend deployment completed successfully!
                 ---------------------------------------
                 Frontend Image: ${FRONTEND_IMAGE}
+                EC2 Instance DNS: ec2-13-218-208-239.compute-1.amazonaws.com
+                Application URL: http://ec2-13-218-208-239.compute-1.amazonaws.com
+                =======================================
                 """
-                
-                if [ -n "${EC2_DNS}" ]; then
-                    echo """
-                EC2 Instance DNS: ${EC2_DNS}
-                EC2 Instance IP: ${EC2_IP}
-                Application URL: http://${EC2_DNS}
-                """
-                fi
-                
-                echo "======================================="
             '''
         }
         

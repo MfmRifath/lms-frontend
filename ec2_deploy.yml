@@ -1,0 +1,83 @@
+---
+# ec2_deploy.yml - Standalone Ansible playbook for EC2 deployment
+- name: Wait for EC2 instance and deploy LMS Frontend
+  hosts: ec2_instances
+  become: yes
+  gather_facts: no
+  vars:
+    docker_image: "rifathmfm/lms-frontend:latest"
+  
+  tasks:
+    - name: Wait for SSH connection with extended timeout
+      wait_for_connection:
+        delay: 10
+        timeout: 600
+        connect_timeout: 30
+        sleep: 15
+      retries: 20
+      delay: 30
+    
+    - name: Gather facts after SSH is available
+      setup:
+    
+    - name: Update all packages
+      yum:
+        name: '*'
+        state: latest
+        update_only: yes
+    
+    - name: Install AWS CLI and required packages
+      yum:
+        name:
+          - amazon-linux-extras
+          - python-pip
+          - unzip
+        state: present
+    
+    - name: Install Docker using amazon-linux-extras
+      shell: amazon-linux-extras install -y docker
+      args:
+        creates: /usr/bin/docker
+    
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+    
+    - name: Add ec2-user to Docker group
+      user:
+        name: ec2-user
+        groups: docker
+        append: yes
+    
+    - name: Pull Docker image
+      community.docker.docker_image:
+        name: "{{ docker_image }}"
+        source: pull
+      become: yes
+    
+    - name: Stop and remove existing container
+      community.docker.docker_container:
+        name: lms-frontend
+        state: absent
+        force_kill: yes
+      ignore_errors: yes
+    
+    - name: Deploy LMS Frontend container
+      community.docker.docker_container:
+        name: lms-frontend
+        image: "{{ docker_image }}"
+        state: started
+        ports:
+          - "80:80"
+        restart_policy: unless-stopped
+    
+    - name: Verify deployment
+      uri:
+        url: "http://localhost:80"
+        return_content: yes
+      register: webpage
+      until: webpage.status == 200
+      retries: 10
+      delay: 5
