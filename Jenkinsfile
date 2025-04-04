@@ -10,7 +10,7 @@ pipeline {
         EC2_USER = "ec2-user"
         EC2_DNS = "ec2-13-218-208-239.compute-1.amazonaws.com"
         EC2_INSTANCE_ID = "i-065a1c89b95538cbb"
-        EC2_SSH_KEY_PATH = '/Users/your-username/Downloads/lms-key-pair.pem' // Your .pem file path
+        EC2_SSH_KEY_PATH = '/Users/mohammedfareesmohammedrifath/Downloads/lms-key-pair.pem' // Your .pem file path
         EC2_INSTANCE_IP = '54.172.172.181'  // Specify your EC2 instance IP
         KEY_PAIR_NAME = 'lms-key-pair'  // The name of your EC2 key pair
     }
