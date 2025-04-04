@@ -499,43 +499,48 @@ EOF
             }
         }
         
-        stage('Deploy with Ansible') {
-            steps {
-                sh '''
-                    # Load EC2 info from properties file
-                    source ec2_info.properties
-                    
-                    # Update the Ansible inventory with the correct EC2 DNS
-                    sed -i "" "s/\${EC2_DNS}/${ec2Dns}/g" ansible/inventory
-                    
-                    # Print the inventory for debugging
-                    echo "Ansible inventory contents:"
-                    cat ansible/inventory
-                    
-                    # Wait for EC2 instance to be ready for SSH
-                    echo "Waiting for EC2 instance to be ready..."
-                    for i in {1..30}; do
-                        if ssh -i ssh_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 ec2-user@${EC2_DNS} "echo Instance is ready"; then
-                            echo "SSH connection successful"
-                            break
-                        fi
-                        echo "Attempt $i: Waiting for SSH to be available..."
-                        sleep 10
-                    done
-                    
-                    # Run Ansible playbook to install Docker
-                    echo "Installing Docker on EC2 instance..."
-                    ansible-playbook -i ansible/inventory ansible/docker.yml
-                    
-                    # Run Ansible playbook to deploy the application
-                    echo "Deploying application with Ansible..."
-                    ansible-playbook -i ansible/inventory ansible/deploy.yml
-                    
-                    echo "Deployment completed successfully!"
-                    echo "Application is available at: http://${EC2_DNS}"
-                '''
-            }
-        }
+        // Fix for the "Deploy with Ansible" stage
+stage('Deploy with Ansible') {
+    steps {
+        sh '''
+            # Load EC2 info from properties file
+            source ec2_info.properties
+            
+            # Print EC2 DNS for debugging
+            echo "EC2 DNS value from properties: ${EC2_DNS}"
+            
+            # Create a new inventory file with the correct EC2 DNS directly
+            echo "[frontend]" > ansible/inventory
+            echo "ec2_host ansible_host=${EC2_DNS} ansible_user=${EC2_USER} ansible_ssh_private_key_file=../ssh_key ansible_ssh_common_args=\"-o StrictHostKeyChecking=no\"" >> ansible/inventory
+            
+            # Print the inventory for debugging
+            echo "Ansible inventory contents:"
+            cat ansible/inventory
+            
+            # Wait for EC2 instance to be ready for SSH
+            echo "Waiting for EC2 instance to be ready..."
+            for i in {1..30}; do
+                if ssh -i ssh_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${EC2_USER}@${EC2_DNS} "echo Instance is ready"; then
+                    echo "SSH connection successful"
+                    break
+                fi
+                echo "Attempt $i: Waiting for SSH to be available..."
+                sleep 10
+            done
+            
+            # Run Ansible playbook to install Docker
+            echo "Installing Docker on EC2 instance..."
+            ansible-playbook -i ansible/inventory ansible/docker.yml
+            
+            # Run Ansible playbook to deploy the application
+            echo "Deploying application with Ansible..."
+            ansible-playbook -i ansible/inventory ansible/deploy.yml
+            
+            echo "Deployment completed successfully!"
+            echo "Application is available at: http://${EC2_DNS}"
+        '''
+    }
+}
     }
     
     post {
