@@ -9,9 +9,6 @@ pipeline {
         PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env.PATH}"
         TF_VAR_public_key_path = "${env.WORKSPACE}/ssh_key.pub"
         EC2_USER = "ec2-user"
-        EC2_DNS = "ec2-13-218-208-239.compute-1.amazonaws.com"
-        EC2_INSTANCE_ID = "i-065a1c89b95538cbb"
-        
     }
     
     stages {
@@ -43,6 +40,9 @@ pipeline {
                     
                     # Check AWS CLI version
                     aws --version || echo "AWS CLI not installed"
+                    
+                    # Check Ansible version
+                    ansible --version || echo "Ansible not installed"
                 '''
             }
         }
@@ -218,6 +218,149 @@ output "ec2_instance_id" {
   value       = aws_instance.lms_frontend.id
 }
 EOF
+
+                    # Create Ansible directory and inventory file
+                    mkdir -p ansible
+                    cat > ansible/inventory <<'EOF'
+[frontend]
+ec2_host ansible_host=${EC2_DNS} ansible_user=ec2-user ansible_ssh_private_key_file=../ssh_key ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+EOF
+
+                    # Create Ansible playbook for Docker installation
+                    cat > ansible/docker.yml <<'EOF'
+---
+- name: Install Docker on EC2 instance
+  hosts: frontend
+  become: yes
+  tasks:
+    - name: Update yum cache
+      yum:
+        update_cache: yes
+      
+    - name: Install Docker dependencies
+      yum:
+        name:
+          - yum-utils
+          - device-mapper-persistent-data
+          - lvm2
+        state: present
+      
+    - name: Add Docker repository
+      shell: amazon-linux-extras install docker -y
+      args:
+        warn: false
+      
+    - name: Install Docker CE
+      yum:
+        name: docker
+        state: present
+      
+    - name: Start Docker service
+      service:
+        name: docker
+        state: started
+        enabled: yes
+      
+    - name: Add ec2-user to docker group
+      user:
+        name: ec2-user
+        groups: docker
+        append: yes
+EOF
+
+                    # Create Ansible playbook for application deployment
+                    cat > ansible/deploy.yml <<'EOF'
+---
+- name: Deploy LMS frontend application
+  hosts: frontend
+  become: yes
+  vars:
+    docker_image: rifathmfm/lms-frontend:latest
+  
+  tasks:
+    - name: Pull Docker image
+      docker_image:
+        name: "{{ docker_image }}"
+        source: pull
+      
+    - name: Stop and remove existing container if it exists
+      docker_container:
+        name: lms-frontend
+        state: absent
+      ignore_errors: yes
+      
+    - name: Run frontend container
+      docker_container:
+        name: lms-frontend
+        image: "{{ docker_image }}"
+        ports:
+          - "80:80"
+        restart_policy: always
+        state: started
+        
+    - name: Check if application is running
+      uri:
+        url: http://localhost
+        return_content: yes
+      register: app_status
+      ignore_errors: yes
+      
+    - name: Report application status
+      debug:
+        msg: "Application is {{ 'running' if app_status.status == 200 else 'not running' }}"
+EOF
+
+                    # Create deployment script for manual deployment option
+                    cat > deploy-script.sh <<'EOF'
+#!/bin/bash
+# Script to deploy the LMS frontend to EC2 instance
+
+# Load configuration
+EC2_DNS=$1
+SSH_KEY_PATH=${2:-ssh_key}
+DOCKER_IMAGE=${3:-rifathmfm/lms-frontend:latest}
+
+# Check if EC2_DNS was provided
+if [ -z "$EC2_DNS" ]; then
+  echo "Error: EC2 DNS name required"
+  echo "Usage: $0 <ec2-dns-name> [ssh-key-path] [docker-image]"
+  exit 1
+fi
+
+echo "Deploying to EC2 instance: $EC2_DNS"
+echo "Using SSH key: $SSH_KEY_PATH"
+echo "Using Docker image: $DOCKER_IMAGE"
+
+# Check if private key exists and has correct permissions
+if [ ! -f "$SSH_KEY_PATH" ]; then
+  echo "Error: SSH key not found at $SSH_KEY_PATH"
+  exit 1
+fi
+
+chmod 400 "$SSH_KEY_PATH"
+
+# Deploy application
+echo "Installing Docker on EC2 instance..."
+ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no ec2-user@"$EC2_DNS" '
+  sudo yum update -y
+  sudo amazon-linux-extras install docker -y
+  sudo service docker start
+  sudo systemctl enable docker
+  sudo usermod -a -G docker ec2-user
+'
+
+echo "Deploying application container..."
+ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no ec2-user@"$EC2_DNS" "
+  sudo docker pull $DOCKER_IMAGE
+  sudo docker rm -f lms-frontend 2>/dev/null || true
+  sudo docker run -d --name lms-frontend -p 80:80 $DOCKER_IMAGE
+  echo 'Deployment complete. Application running at: http://$EC2_DNS'
+"
+
+echo "Deployment completed successfully!"
+echo "Application available at: http://$EC2_DNS"
+EOF
+                    chmod +x deploy-script.sh
                 '''
             }
         }
@@ -349,39 +492,48 @@ EOF
             }
         }
         
-stage('Deploy with Ansible') {
-    steps {
-        script {
-            // Load EC2 info from Terraform output
-            def ec2Info = readProperties file: 'terraform_output.json'
-            def ec2Dns = ec2Info['ec2_instance_dns']
-            def ec2InstanceId = ec2Info['ec2_instance_id']
-            
-            // Replace inventory file with the correct EC2 DNS
-            sh """
-                sed -i 's/\${EC2_DNS}/${ec2Dns}/g' ansible/inventory
-            """
-            
-            // Run Ansible playbook to install Docker
-            sh """
-                ansible-playbook -i ansible/inventory ansible/docker.yml
-            """
-            
-            // Run Ansible playbook to deploy the application
-            sh """
-                ansible-playbook -i ansible/inventory ansible/deploy.yml
-            """
-            
-            echo "Deployment completed successfully!"
-            echo "Application is available at: http://${ec2Dns}"
+        stage('Deploy with Ansible') {
+            steps {
+                sh '''
+                    # Load EC2 info from properties file
+                    source ec2_info.properties
+                    
+                    # Update the Ansible inventory with the correct EC2 DNS
+                    sed -i "s/\\${EC2_DNS}/${EC2_DNS}/g" ansible/inventory
+                    
+                    # Print the inventory for debugging
+                    echo "Ansible inventory contents:"
+                    cat ansible/inventory
+                    
+                    # Wait for EC2 instance to be ready for SSH
+                    echo "Waiting for EC2 instance to be ready..."
+                    for i in {1..30}; do
+                        if ssh -i ssh_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 ec2-user@${EC2_DNS} "echo Instance is ready"; then
+                            echo "SSH connection successful"
+                            break
+                        fi
+                        echo "Attempt $i: Waiting for SSH to be available..."
+                        sleep 10
+                    done
+                    
+                    # Run Ansible playbook to install Docker
+                    echo "Installing Docker on EC2 instance..."
+                    ansible-playbook -i ansible/inventory ansible/docker.yml
+                    
+                    # Run Ansible playbook to deploy the application
+                    echo "Deploying application with Ansible..."
+                    ansible-playbook -i ansible/inventory ansible/deploy.yml
+                    
+                    echo "Deployment completed successfully!"
+                    echo "Application is available at: http://${EC2_DNS}"
+                '''
+            }
         }
-    }
-}
     }
     
     post {
         always {
-            archiveArtifacts artifacts: 'ssh_key, ssh_key.pub, ec2_info.properties, terraform_output.json, deploy-script.sh', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'ssh_key, ssh_key.pub, ec2_info.properties, terraform_output.json, deploy-script.sh, ansible/*', allowEmptyArchive: true
         }
         
         success {
