@@ -7,8 +7,9 @@ pipeline {
         AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
         FRONTEND_IMAGE = 'rifathmfm/lms-frontend:latest'
         PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env.PATH}"
-        TF_VAR_public_key_path = "${env.WORKSPACE}/ssh_key.pub"
+        TF_VAR_public_key_path = "${env.WORKSPACE}/terraform/ssh_key.pub"
         EC2_USER = "ubuntu"
+        SSH_CREDS_ID = "aws-ssh-key" // SSH key credential ID from your Jenkins
     }
     
     stages {
@@ -49,6 +50,17 @@ pipeline {
         
         stage('Setup Project') {
             steps {
+                // Write SSH public key from credentials to a file for Terraform
+                sshagent(credentials: [env.SSH_CREDS_ID]) {
+                    sh '''
+                        # Extract public key from ssh-agent to use with Terraform
+                        mkdir -p terraform
+                        ssh-add -L | head -n 1 > ${TF_VAR_public_key_path}
+                        echo "Using public key for Terraform:"
+                        cat ${TF_VAR_public_key_path}
+                    '''
+                }
+                
                 sh '''
                     # Create a simple package.json if it doesn't exist
                     if [ ! -f package.json ]; then
@@ -89,13 +101,6 @@ pipeline {
                             try_files $uri $uri/ /index.html;
                         }
                     }' > nginx/conf.d/default.conf
-                    
-                    # Generate SSH key pair for EC2 access - FORCE OVERWRITE
-                    rm -f ssh_key ssh_key.pub
-                    ssh-keygen -t rsa -b 2048 -f ssh_key -N "" -q
-                    chmod 400 ssh_key
-                    echo "Generated public key:"
-                    cat ssh_key.pub
                     
                     # Create Terraform directory
                     mkdir -p terraform
@@ -342,31 +347,21 @@ EOF
 
 # Load configuration
 EC2_DNS=$1
-SSH_KEY_PATH=${2:-ssh_key}
-DOCKER_IMAGE=${3:-rifathmfm/lms-frontend:latest}
+DOCKER_IMAGE=${2:-rifathmfm/lms-frontend:latest}
 
 # Check if EC2_DNS was provided
 if [ -z "$EC2_DNS" ]; then
   echo "Error: EC2 DNS name required"
-  echo "Usage: $0 <ec2-dns-name> [ssh-key-path] [docker-image]"
+  echo "Usage: $0 <ec2-dns-name> [docker-image]"
   exit 1
 fi
 
 echo "Deploying to EC2 instance: $EC2_DNS"
-echo "Using SSH key: $SSH_KEY_PATH"
 echo "Using Docker image: $DOCKER_IMAGE"
-
-# Check if private key exists and has correct permissions
-if [ ! -f "$SSH_KEY_PATH" ]; then
-  echo "Error: SSH key not found at $SSH_KEY_PATH"
-  exit 1
-fi
-
-chmod 400 "$SSH_KEY_PATH"
 
 # Deploy application
 echo "Installing Docker on EC2 instance..."
-ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no ubuntu@"$EC2_DNS" '
+ssh -o StrictHostKeyChecking=no ubuntu@"$EC2_DNS" '
   sudo apt-get update -y
   sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
@@ -379,7 +374,7 @@ ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no ubuntu@"$EC2_DNS" '
 '
 
 echo "Deploying application container..."
-ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no ubuntu@"$EC2_DNS" "
+ssh -o StrictHostKeyChecking=no ubuntu@"$EC2_DNS" "
   sudo docker pull $DOCKER_IMAGE
   sudo docker rm -f lms-frontend 2>/dev/null || true
   sudo docker run -d --name lms-frontend -p 80:80 $DOCKER_IMAGE
@@ -527,62 +522,61 @@ EOF
         
         stage('Deploy with Ansible') {
             steps {
-                sh '''
-                    # Load EC2 info from properties file
-                    source ec2_info.properties
-                    
-                    # Create a new inventory file with the correct EC2 DNS
-                    echo "[frontend]" > ansible/inventory
-                    echo "ec2_host ansible_host=${EC2_DNS} ansible_user=${EC2_USER} ansible_ssh_private_key_file=../ssh_key ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> ansible/inventory
-                    
-                    # Print the inventory for debugging
-                    echo "Ansible inventory contents:"
-                    cat ansible/inventory
-                    
-                    # Verify SSH key permissions
-                    echo "Verifying SSH key permissions:"
-                    ls -la ssh_key
-                    
-                    # Test SSH connection with verbose output for debugging
-                    echo "Testing SSH connection with verbose output:"
-                    ssh -v -i ssh_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${EC2_USER}@${EC2_DNS} "echo SSH connection test" || echo "SSH test failed but continuing..."
-                    
-                    # Wait with longer timeouts and more attempts
-                    echo "Waiting for EC2 instance to be ready for SSH..."
-                    MAX_ATTEMPTS=20
-                    for i in $(seq 1 $MAX_ATTEMPTS); do
-                        if ssh -i ssh_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 ${EC2_USER}@${EC2_DNS} "echo Instance is ready"; then
-                            echo "SSH connection successful on attempt $i"
-                            break
-                        fi
+                sshagent(credentials: [env.SSH_CREDS_ID]) {
+                    sh '''
+                        # Load EC2 info from properties file
+                        source ec2_info.properties
                         
-                        if [ $i -eq $MAX_ATTEMPTS ]; then
-                            echo "Failed to establish SSH connection after $MAX_ATTEMPTS attempts"
-                            exit 1
-                        fi
+                        # Create a new inventory file for Ansible
+                        # Using SSH Agent, so we don't need to specify private key file
+                        echo "[frontend]" > ansible/inventory
+                        echo "ec2_host ansible_host=${EC2_DNS} ansible_user=${EC2_USER} ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> ansible/inventory
                         
-                        echo "Attempt $i of $MAX_ATTEMPTS: Waiting for SSH to be available..."
-                        sleep 15
-                    done
-                    
-                    # Run Ansible with verbose output for debugging
-                    echo "Running Ansible playbook with verbose output..."
-                    ANSIBLE_DEBUG=1 ansible-playbook -vvv -i ansible/inventory ansible/docker.yml
-                    
-                    # Deploy the application with Ansible
-                    echo "Deploying application with Ansible..."
-                    ansible-playbook -i ansible/inventory ansible/deploy.yml
-                    
-                    echo "Deployment completed successfully!"
-                    echo "Application is available at: http://${EC2_DNS}"
-                '''
+                        # Print the inventory for debugging
+                        echo "Ansible inventory contents:"
+                        cat ansible/inventory
+                        
+                        # Test SSH connection with verbose output for debugging
+                        echo "Testing SSH connection with SSH Agent:"
+                        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${EC2_USER}@${EC2_DNS} "echo SSH connection test" || echo "SSH test failed but continuing..."
+                        
+                        # Wait with longer timeouts and more attempts
+                        echo "Waiting for EC2 instance to be ready for SSH..."
+                        MAX_ATTEMPTS=20
+                        for i in $(seq 1 $MAX_ATTEMPTS); do
+                            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 ${EC2_USER}@${EC2_DNS} "echo Instance is ready"; then
+                                echo "SSH connection successful on attempt $i"
+                                break
+                            fi
+                            
+                            if [ $i -eq $MAX_ATTEMPTS ]; then
+                                echo "Failed to establish SSH connection after $MAX_ATTEMPTS attempts"
+                                exit 1
+                            fi
+                            
+                            echo "Attempt $i of $MAX_ATTEMPTS: Waiting for SSH to be available..."
+                            sleep 15
+                        done
+                        
+                        # Run Ansible with verbose output for debugging
+                        echo "Running Ansible playbook with verbose output..."
+                        ANSIBLE_DEBUG=1 ansible-playbook -vvv -i ansible/inventory ansible/docker.yml
+                        
+                        # Deploy the application with Ansible
+                        echo "Deploying application with Ansible..."
+                        ansible-playbook -i ansible/inventory ansible/deploy.yml
+                        
+                        echo "Deployment completed successfully!"
+                        echo "Application is available at: http://${EC2_DNS}"
+                    '''
+                }
             }
         }
     }
     
     post {
         always {
-            archiveArtifacts artifacts: 'ssh_key, ssh_key.pub, ec2_info.properties, terraform_output.json, deploy-script.sh, ansible/*', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'terraform/ssh_key.pub, ec2_info.properties, terraform_output.json, deploy-script.sh, ansible/*', allowEmptyArchive: true
         }
         
         success {
