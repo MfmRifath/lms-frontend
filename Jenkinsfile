@@ -7,12 +7,11 @@ pipeline {
         AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
         FRONTEND_IMAGE = 'rifathmfm/lms-frontend:latest'
         PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env.PATH}"
+        TF_VAR_public_key_path = "${env.WORKSPACE}/ssh_key.pub"
         EC2_USER = "ec2-user"
         EC2_DNS = "ec2-13-218-208-239.compute-1.amazonaws.com"
         EC2_INSTANCE_ID = "i-065a1c89b95538cbb"
-        EC2_SSH_KEY_PATH = '/Users/your-username/Downloads/lms-key-pair.pem' // Your .pem file path
-        EC2_INSTANCE_IP = '54.172.172.181'  // Specify your EC2 instance IP
-        KEY_PAIR_NAME = 'lms-key-pair'  // The name of your EC2 key pair
+        
     }
     
     stages {
@@ -91,33 +90,16 @@ pipeline {
                         }
                     }' > nginx/conf.d/default.conf
                     
-                    # Copy the PEM file to the workspace if it exists
-                    if [ -f "${EC2_SSH_KEY_PATH}" ]; then
-                        echo "Copying PEM file to workspace..."
-                        cp "${EC2_SSH_KEY_PATH}" ./lms-key-pair.pem
-                        chmod 400 ./lms-key-pair.pem
-                    else
-                        echo "WARNING: PEM file not found at ${EC2_SSH_KEY_PATH}"
-                        # Generate a new key pair for AWS deployment
-                        echo "Generating a new SSH key pair..."
-                        ssh-keygen -t rsa -b 2048 -f lms-key-pair -N "" -q
-                        chmod 400 lms-key-pair
-                    fi
-                    
-                    # Extract the public key from the PEM file if it exists
-                    if [ -f "lms-key-pair.pem" ]; then
-                        ssh-keygen -y -f lms-key-pair.pem > lms-key-pair.pub || {
-                            echo "Failed to extract public key from PEM file. Generating new key pair..."
-                            ssh-keygen -t rsa -b 2048 -f lms-key-pair -N "" -q
-                            chmod 400 lms-key-pair
-                        }
-                    fi
+                    # Generate SSH key pair for EC2 access - FORCE OVERWRITE
+                    rm -f ssh_key ssh_key.pub
+                    ssh-keygen -t rsa -b 2048 -f ssh_key -N "" -q
+                    chmod 400 ssh_key
                     
                     # Create Terraform directory
                     mkdir -p terraform
                     
-                    # Create main.tf - using public key for key_pair creation
-                    cat > terraform/main.tf <<EOF
+                    # Create main.tf
+                    cat > terraform/main.tf <<'EOF'
 provider "aws" {
   region = var.aws_region
 }
@@ -165,7 +147,7 @@ resource "aws_security_group" "lms_frontend_sg" {
 
 resource "aws_key_pair" "lms_key_pair" {
   key_name   = "lms-key-pair"
-  public_key = file("\${path.module}/../lms-key-pair.pub")
+  public_key = file(var.public_key_path)
 }
 
 resource "aws_instance" "lms_frontend" {
@@ -211,6 +193,11 @@ variable "instance_ami" {
   description = "AMI ID for the EC2 instance (Amazon Linux 2)"
   type        = string
   default     = "ami-0230bd60aa48260c6" # Amazon Linux 2 in us-east-1
+}
+
+variable "public_key_path" {
+  description = "Path to the public key for SSH access"
+  type        = string
 }
 EOF
 
@@ -339,7 +326,7 @@ EOF
                     terraform init
                     
                     # Plan the deployment
-                    terraform plan -out=tfplan
+                    terraform plan -out=tfplan -var "public_key_path=${TF_VAR_public_key_path}"
                     
                     # Apply the Terraform configuration
                     terraform apply -auto-approve tfplan
@@ -362,22 +349,22 @@ EOF
             }
         }
         
-        stage('Deploy with PEM File') {
-            steps {
-                sh '''
-                    # Load EC2 info from properties file
-                    source ec2_info.properties
-                    
-                    # Wait for EC2 instance to be status OK
-                    echo "Waiting for EC2 instance to be ready (status check)..."
-                    aws ec2 wait instance-status-ok --region us-east-1 --instance-ids ${EC2_INSTANCE_ID} || true
-                    
-                    # Add additional wait time after instance status check
-                    echo "Instance passed status check, waiting 60 more seconds for SSH to be ready..."
-                    sleep 60
-                    
-                    # Create a deployment script
-                    cat > deploy-script.sh <<EOF
+        stage('Deploy with Direct SSH') {
+    steps {
+        sh '''
+            # Set permissions on SSH key
+            chmod 400 ssh_key
+            
+            # Wait for EC2 instance to be status OK (much faster than SSH polling)
+            echo "Waiting for EC2 instance to be ready (status check)..."
+            aws ec2 wait instance-status-ok --region us-east-1 --instance-ids ${EC2_INSTANCE_ID} || true
+            
+            # Add additional wait time after instance status check
+            echo "Instance passed status check, waiting 60 more seconds for SSH to be ready..."
+            sleep 60
+            
+            # Create a deployment script
+            cat > deploy-script.sh <<EOF
 #!/bin/bash
 set -e
 
@@ -417,37 +404,24 @@ sudo docker ps | grep lms-frontend
 
 echo "Deployment completed successfully!"
 EOF
-                    
-                    # Make the script executable
-                    chmod +x deploy-script.sh
-                    
-                    # Determine which key file to use
-                    if [ -f lms-key-pair.pem ]; then
-                        KEY_FILE="lms-key-pair.pem"
-                    elif [ -f lms-key-pair ]; then
-                        KEY_FILE="lms-key-pair"
-                    else
-                        echo "ERROR: Neither lms-key-pair.pem nor lms-key-pair private key found"
-                        exit 1
-                    fi
-                    
-                    echo "Using key file: $KEY_FILE for SSH access"
-                    chmod 400 $KEY_FILE
-                    
-                    # Directly SSH into the EC2 instance using the key file and run the deploy script
-                    echo "Connecting to EC2 instance and running deployment script..."
-                    ssh -i $KEY_FILE -o StrictHostKeyChecking=no ec2-user@${EC2_DNS} 'bash -s' < deploy-script.sh
-                    
-                    echo "Deployment completed successfully!"
-                    echo "Application is now available at: http://${EC2_DNS}"
-                '''
-            }
-        }
+            
+            # Make the script executable
+            chmod +x deploy-script.sh
+            
+            # Directly SSH into the EC2 instance and run the deploy script
+            echo "Connecting to EC2 instance and running deployment script..."
+            ssh -i ssh_key ec2-user@${EC2_DNS} 'bash -s' < deploy-script.sh
+            
+            echo "Deployment completed successfully!"
+            echo "Application is now available at: http://${EC2_DNS}"
+        '''
+    }
+}
     }
     
     post {
         always {
-            archiveArtifacts artifacts: 'lms-key-pair.pem, lms-key-pair, lms-key-pair.pub, ec2_info.properties, terraform_output.json, deploy-script.sh', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'ssh_key, ssh_key.pub, ec2_info.properties, terraform_output.json, deploy-script.sh', allowEmptyArchive: true
         }
         
         success {
