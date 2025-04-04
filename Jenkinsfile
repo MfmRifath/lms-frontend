@@ -9,7 +9,7 @@ pipeline {
         PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env.PATH}"
         TF_VAR_public_key_path = "${env.WORKSPACE}/terraform/ssh_key.pub"
         EC2_USER = "ubuntu"
-        SSH_CREDS_ID = "aws-ssh-key" // SSH key credential ID from your Jenkins
+        SSH_CREDS_ID = "s2oadmin" // SSH key credential ID from your Jenkins
     }
     
     stages {
@@ -22,7 +22,7 @@ pipeline {
         stage('Verify Tools') {
             steps {
                 sh '''
-                    # Check PATH and environmen
+                    # Check PATH and environment
                     echo "Current PATH: $PATH"
                     echo "Current user: $(id)"
                     
