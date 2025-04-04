@@ -123,7 +123,13 @@ resource "aws_security_group" "lms_frontend_sg" {
     cidr_blocks = ["0.0.0.0/0"]
     description = "HTTP access"
   }
-
+  ingress {
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Access for application on port 3000"
+  }
   ingress {
     from_port   = 443
     to_port     = 443
