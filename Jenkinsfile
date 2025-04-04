@@ -349,21 +349,21 @@ EOF
         }
         
         stage('Deploy with Direct SSH') {
-            steps {
-                sh '''
-                    # Set permissions on SSH key
-                    chmod 400 ssh_key
-                    
-                    # Wait for EC2 instance to be status OK (much faster than SSH polling)
-                    echo "Waiting for EC2 instance to be ready (status check)..."
-                    aws ec2 wait instance-status-ok --region us-east-1 --instance-ids ${EC2_INSTANCE_ID} || true
-                    
-                    # Add additional wait time after instance status check
-                    echo "Instance passed status check, waiting 60 more seconds for SSH to be ready..."
-                    sleep 60
-                    
-                    # Create a deployment script
-                    cat > deploy-script.sh <<EOF
+    steps {
+        sh '''
+            # Set permissions on SSH key
+            chmod 400 ssh_key
+            
+            # Wait for EC2 instance to be status OK (much faster than SSH polling)
+            echo "Waiting for EC2 instance to be ready (status check)..."
+            aws ec2 wait instance-status-ok --region us-east-1 --instance-ids ${EC2_INSTANCE_ID} || true
+            
+            # Add additional wait time after instance status check
+            echo "Instance passed status check, waiting 60 more seconds for SSH to be ready..."
+            sleep 60
+            
+            # Create a deployment script
+            cat > deploy-script.sh <<EOF
 #!/bin/bash
 set -e
 
@@ -403,83 +403,19 @@ sudo docker ps | grep lms-frontend
 
 echo "Deployment completed successfully!"
 EOF
-                    
-                    # Make the script executable
-                    chmod +x deploy-script.sh
-                    
-                    # Using AWS Systems Manager instead of direct SSH (more reliable)
-                    echo "Checking if we can use AWS SSM for deployment..."
-                    if aws ec2 describe-instance-status --instance-id ${EC2_INSTANCE_ID} | grep -q "running"; then
-                        echo "Instance is running, continuing with direct SSH..."
-                    else
-                        echo "Instance not running"
-                        exit 1
-                    fi
-                    
-                    # Manual SSH connection retry loop with increasing timeouts
-                    MAX_ATTEMPTS=20
-                    ATTEMPT=1
-                    DELAY=20
-                    CONNECTED=false
-                    
-                    while [ $ATTEMPT -le $MAX_ATTEMPTS ] && [ "$CONNECTED" = "false" ]; do
-                        echo "SSH connection attempt $ATTEMPT/$MAX_ATTEMPTS..."
-                        
-                        # Try to copy the script with extended timeout
-                        if scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=60 -i ssh_key deploy-script.sh ec2-user@${EC2_DNS}:~/ 2>/dev/null; then
-                            echo "Successfully copied deployment script"
-                            
-                            # Try to execute the script with extended timeout
-                            if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=60 -i ssh_key ec2-user@${EC2_DNS} "bash ~/deploy-script.sh"; then
-                                echo "Deployment script executed successfully"
-                                CONNECTED=true
-                                break
-                            else
-                                echo "Deployment script execution failed"
-                            fi
-                        fi
-                        
-                        echo "Connection attempt failed, retrying in $DELAY seconds..."
-                        sleep $DELAY
-                        ATTEMPT=$((ATTEMPT + 1))
-                        
-                        # Increase delay time progressively
-                        if [ $ATTEMPT -gt 5 ]; then
-                            DELAY=30
-                        fi
-                        if [ $ATTEMPT -gt 10 ]; then
-                            DELAY=45
-                        fi
-                        if [ $ATTEMPT -gt 15 ]; then
-                            DELAY=60
-                        fi
-                    done
-                    
-                    if [ "$CONNECTED" = "true" ]; then
-                        echo "Deployment completed successfully!"
-                        echo "Application is now available at: http://${EC2_DNS}"
-                    else
-                        echo "Deployment failed after $MAX_ATTEMPTS attempts"
-                        
-                        # Run diagnostics
-                        echo "Running diagnostics..."
-                        echo "Checking instance details..."
-                        aws ec2 describe-instances --instance-ids ${EC2_INSTANCE_ID} --query 'Reservations[0].Instances[0].{State:State.Name,Platform:Platform,Type:InstanceType,PublicDNS:PublicDnsName,KeyName:KeyName}'
-                        
-                        echo "Checking security group rules..."
-                        aws ec2 describe-security-groups --group-ids $(aws ec2 describe-instances --instance-ids ${EC2_INSTANCE_ID} --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' --output text) --query 'SecurityGroups[0].IpPermissions'
-                        
-                        echo "Testing ping to instance..."
-                        ping -c 3 ${EC2_DNS} || echo "Ping failed"
-                        
-                        echo "Testing TCP connection to SSH port..."
-                        nc -zv -w 10 ${EC2_DNS} 22 || echo "SSH port not reachable"
-                        
-                        exit 1
-                    fi
-                '''
-            }
-        }
+            
+            # Make the script executable
+            chmod +x deploy-script.sh
+            
+            # Directly SSH into the EC2 instance and run the deploy script
+            echo "Connecting to EC2 instance and running deployment script..."
+            ssh -i ssh_key ec2-user@${EC2_DNS} 'bash -s' < deploy-script.sh
+            
+            echo "Deployment completed successfully!"
+            echo "Application is now available at: http://${EC2_DNS}"
+        '''
+    }
+}
     }
     
     post {
