@@ -94,6 +94,8 @@ pipeline {
                     rm -f ssh_key ssh_key.pub
                     ssh-keygen -t rsa -b 2048 -f ssh_key -N "" -q
                     chmod 400 ssh_key
+                    echo "Generated public key:"
+                    cat ssh_key.pub
                     
                     # Create Terraform directory
                     mkdir -p terraform
@@ -157,7 +159,7 @@ resource "aws_key_pair" "lms_key_pair" {
 }
 
 resource "aws_instance" "lms_frontend" {
-  ami                    = var.instance_ami  # Make sure this is the Ubuntu AMI
+  ami                    = var.instance_ami
   instance_type          = var.instance_type
   key_name               = aws_key_pair.lms_key_pair.key_name
   vpc_security_group_ids = [aws_security_group.lms_frontend_sg.id]
@@ -170,6 +172,16 @@ resource "aws_instance" "lms_frontend" {
               systemctl start docker
               systemctl enable docker
               usermod -aG docker ubuntu
+              
+              # Make sure SSH is running and properly configured
+              systemctl restart ssh
+              
+              # Make sure the ubuntu user is authorized to use the SSH key
+              mkdir -p /home/ubuntu/.ssh
+              chmod 700 /home/ubuntu/.ssh
+              
+              # Log the instance startup completion
+              echo "$(date): Instance initialization complete" >> /var/log/user-data.log
               
               # Signal that the instance is ready by creating a file
               touch /tmp/instance-ready
@@ -196,9 +208,9 @@ variable "instance_type" {
 }
 
 variable "instance_ami" {
-  description = "AMI ID for the EC2 instance (Amazon Linux 2)"
+  description = "AMI ID for the EC2 instance (Ubuntu)"
   type        = string
-  default     = "ami-0230bd60aa48260c6" # Amazon Linux 2 in us-east-1
+  default     = "ami-0230bd60aa48260c6" # Ubuntu 22.04 LTS in us-east-1
 }
 
 variable "public_key_path" {
@@ -229,37 +241,43 @@ EOF
                     rm -rf ansible
                     mkdir -p ansible
                     
-                    # Create Ansible inventory file
+                    # Create Ansible inventory template file (will be populated later)
                     echo '[frontend]' > ansible/inventory
-                    echo 'ec2_host ansible_host=${EC2_DNS} ansible_user=ec2-user ansible_ssh_private_key_file=../ssh_key ansible_ssh_common_args="-o StrictHostKeyChecking=no"' >> ansible/inventory
+                    echo '# Will be populated with actual EC2 DNS during deployment' >> ansible/inventory
 
-                    # Create Ansible playbook for Docker installation
+                    # Create Ansible playbook for Docker installation (updated for Ubuntu)
                     cat > ansible/docker.yml <<'EOF'
 ---
 - name: Install Docker on EC2 instance
   hosts: frontend
   become: yes
   tasks:
-    - name: Update yum cache
-      yum:
+    - name: Update apt cache
+      apt:
         update_cache: yes
       
-    - name: Install Docker dependencies
-      yum:
+    - name: Install required packages
+      apt:
         name:
-          - yum-utils
-          - device-mapper-persistent-data
-          - lvm2
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+        state: present
+      
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
         state: present
       
     - name: Add Docker repository
-      shell: amazon-linux-extras install docker -y
-      args:
-        warn: false
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+        state: present
       
     - name: Install Docker CE
-      yum:
-        name: docker
+      apt:
+        name: docker-ce
         state: present
       
     - name: Start Docker service
@@ -268,9 +286,9 @@ EOF
         state: started
         enabled: yes
       
-    - name: Add ec2-user to docker group
+    - name: Add ubuntu user to docker group
       user:
-        name: ec2-user
+        name: ubuntu
         groups: docker
         append: yes
 EOF
@@ -348,16 +366,20 @@ chmod 400 "$SSH_KEY_PATH"
 
 # Deploy application
 echo "Installing Docker on EC2 instance..."
-ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no ec2-user@"$EC2_DNS" '
-  sudo yum update -y
-  sudo amazon-linux-extras install docker -y
-  sudo service docker start
+ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no ubuntu@"$EC2_DNS" '
+  sudo apt-get update -y
+  sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+  sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+  sudo apt-get update -y
+  sudo apt-get install -y docker-ce
+  sudo systemctl start docker
   sudo systemctl enable docker
-  sudo usermod -a -G docker ec2-user
+  sudo usermod -aG docker ubuntu
 '
 
 echo "Deploying application container..."
-ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no ec2-user@"$EC2_DNS" "
+ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=no ubuntu@"$EC2_DNS" "
   sudo docker pull $DOCKER_IMAGE
   sudo docker rm -f lms-frontend 2>/dev/null || true
   sudo docker run -d --name lms-frontend -p 80:80 $DOCKER_IMAGE
@@ -495,52 +517,67 @@ EOF
                     
                     echo "EC2 Instance provisioned at: ${EC2_DNS}"
                     echo "EC2 Instance ID: ${EC2_INSTANCE_ID}"
+                    
+                    # Wait for instance to initialize before proceeding
+                    echo "Waiting for instance initialization (2 minutes)..."
+                    sleep 120
                 '''
             }
         }
         
-        // Fix for the "Deploy with Ansible" stage
-stage('Deploy with Ansible') {
-    steps {
-        sh '''
-            # Load EC2 info from properties file
-            source ec2_info.properties
-            
-            # Print EC2 DNS for debugging
-            echo "EC2 DNS value from properties: ${EC2_DNS}"
-            
-            # Create a new inventory file with the correct EC2 DNS directly
-            echo "[frontend]" > ansible/inventory
-            echo "ec2_host ansible_host=${EC2_DNS} ansible_user=${EC2_USER} ansible_ssh_private_key_file=../ssh_key ansible_ssh_common_args=\"-o StrictHostKeyChecking=no\"" >> ansible/inventory
-            
-            # Print the inventory for debugging
-            echo "Ansible inventory contents:"
-            cat ansible/inventory
-            
-            # Wait for EC2 instance to be ready for SSH
-            echo "Waiting for EC2 instance to be ready..."
-            for i in {1..30}; do
-                if ssh -i ssh_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${EC2_USER}@${EC2_DNS} "echo Instance is ready"; then
-                    echo "SSH connection successful"
-                    break
-                fi
-                echo "Attempt $i: Waiting for SSH to be available..."
-                sleep 10
-            done
-            
-            # Run Ansible playbook to install Docker
-            echo "Installing Docker on EC2 instance..."
-            ansible-playbook -i ansible/inventory ansible/docker.yml
-            
-            # Run Ansible playbook to deploy the application
-            echo "Deploying application with Ansible..."
-            ansible-playbook -i ansible/inventory ansible/deploy.yml
-            
-            echo "Deployment completed successfully!"
-            echo "Application is available at: http://${EC2_DNS}"
-        '''
-    }
-}
+        stage('Deploy with Ansible') {
+            steps {
+                sh '''
+                    # Load EC2 info from properties file
+                    source ec2_info.properties
+                    
+                    # Create a new inventory file with the correct EC2 DNS
+                    echo "[frontend]" > ansible/inventory
+                    echo "ec2_host ansible_host=${EC2_DNS} ansible_user=${EC2_USER} ansible_ssh_private_key_file=../ssh_key ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> ansible/inventory
+                    
+                    # Print the inventory for debugging
+                    echo "Ansible inventory contents:"
+                    cat ansible/inventory
+                    
+                    # Verify SSH key permissions
+                    echo "Verifying SSH key permissions:"
+                    ls -la ssh_key
+                    
+                    # Test SSH connection with verbose output for debugging
+                    echo "Testing SSH connection with verbose output:"
+                    ssh -v -i ssh_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${EC2_USER}@${EC2_DNS} "echo SSH connection test" || echo "SSH test failed but continuing..."
+                    
+                    # Wait with longer timeouts and more attempts
+                    echo "Waiting for EC2 instance to be ready for SSH..."
+                    MAX_ATTEMPTS=20
+                    for i in $(seq 1 $MAX_ATTEMPTS); do
+                        if ssh -i ssh_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 ${EC2_USER}@${EC2_DNS} "echo Instance is ready"; then
+                            echo "SSH connection successful on attempt $i"
+                            break
+                        fi
+                        
+                        if [ $i -eq $MAX_ATTEMPTS ]; then
+                            echo "Failed to establish SSH connection after $MAX_ATTEMPTS attempts"
+                            exit 1
+                        fi
+                        
+                        echo "Attempt $i of $MAX_ATTEMPTS: Waiting for SSH to be available..."
+                        sleep 15
+                    done
+                    
+                    # Run Ansible with verbose output for debugging
+                    echo "Running Ansible playbook with verbose output..."
+                    ANSIBLE_DEBUG=1 ansible-playbook -vvv -i ansible/inventory ansible/docker.yml
+                    
+                    # Deploy the application with Ansible
+                    echo "Deploying application with Ansible..."
+                    ansible-playbook -i ansible/inventory ansible/deploy.yml
+                    
+                    echo "Deployment completed successfully!"
+                    echo "Application is available at: http://${EC2_DNS}"
+                '''
+            }
+        }
     }
     
     post {
