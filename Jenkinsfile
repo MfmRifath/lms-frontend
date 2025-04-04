@@ -219,12 +219,13 @@ output "ec2_instance_id" {
 }
 EOF
 
-                    # Create Ansible directory and inventory file
+                    # Make sure ansible directory exists and is clean
+                    rm -rf ansible
                     mkdir -p ansible
-                    cat > ansible/inventory <<'EOF'
-[frontend]
-ec2_host ansible_host=${EC2_DNS} ansible_user=ec2-user ansible_ssh_private_key_file=../ssh_key ansible_ssh_common_args='-o StrictHostKeyChecking=no'
-EOF
+                    
+                    # Create Ansible inventory file
+                    echo '[frontend]' > ansible/inventory
+                    echo 'ec2_host ansible_host=${EC2_DNS} ansible_user=ec2-user ansible_ssh_private_key_file=../ssh_key ansible_ssh_common_args="-o StrictHostKeyChecking=no"' >> ansible/inventory
 
                     # Create Ansible playbook for Docker installation
                     cat > ansible/docker.yml <<'EOF'
