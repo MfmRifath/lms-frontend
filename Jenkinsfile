@@ -500,7 +500,7 @@ EOF
                     source ec2_info.properties
                     
                     # Update the Ansible inventory with the correct EC2 DNS
-                    sed -i "s/\\${EC2_DNS}/${EC2_DNS}/g" ansible/inventory
+                    sed -i "" "s/\${EC2_DNS}/${ec2Dns}/g" ansible/inventory
                     
                     # Print the inventory for debugging
                     echo "Ansible inventory contents:"
