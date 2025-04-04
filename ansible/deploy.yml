@@ -1,0 +1,30 @@
+---
+- name: Deploy LMS Frontend on EC2
+  hosts: ec2
+  become: yes
+  tasks:
+    - name: Pull Docker image from Docker Hub
+      docker_image:
+        name: "{{ FRONTEND_IMAGE }}"
+        source: pull
+
+    - name: Stop any running container
+      docker_container:
+        name: lms-frontend
+        state: stopped
+        ignore_errors: yes
+
+    - name: Remove any stopped containers
+      docker_container:
+        name: lms-frontend
+        state: absent
+        ignore_errors: yes
+
+    - name: Run the Docker container
+      docker_container:
+        name: lms-frontend
+        image: "{{ FRONTEND_IMAGE }}"
+        state: started
+        restart_policy: unless-stopped
+        published_ports:
+          - "80:80"

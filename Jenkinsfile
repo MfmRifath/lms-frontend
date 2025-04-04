@@ -349,72 +349,32 @@ EOF
             }
         }
         
-        stage('Deploy with Direct SSH') {
+stage('Deploy with Ansible') {
     steps {
-        sh '''
-            # Set permissions on SSH key
-            chmod 400 ssh_key
+        script {
+            // Load EC2 info from Terraform output
+            def ec2Info = readProperties file: 'terraform_output.json'
+            def ec2Dns = ec2Info['ec2_instance_dns']
+            def ec2InstanceId = ec2Info['ec2_instance_id']
             
-            # Wait for EC2 instance to be status OK (much faster than SSH polling)
-            echo "Waiting for EC2 instance to be ready (status check)..."
-            aws ec2 wait instance-status-ok --region us-east-1 --instance-ids ${EC2_INSTANCE_ID} || true
+            // Replace inventory file with the correct EC2 DNS
+            sh """
+                sed -i 's/\${EC2_DNS}/${ec2Dns}/g' ansible/inventory
+            """
             
-            # Add additional wait time after instance status check
-            echo "Instance passed status check, waiting 60 more seconds for SSH to be ready..."
-            sleep 60
+            // Run Ansible playbook to install Docker
+            sh """
+                ansible-playbook -i ansible/inventory ansible/docker.yml
+            """
             
-            # Create a deployment script
-            cat > deploy-script.sh <<EOF
-#!/bin/bash
-set -e
-
-echo "Starting deployment script on EC2 instance..."
-
-# Update system packages
-echo "Updating system packages..."
-sudo yum update -y
-
-# Check if Docker is installed, install if not
-if ! command -v docker &> /dev/null; then
-    echo "Installing Docker..."
-    sudo amazon-linux-extras install docker -y
-    sudo service docker start
-    sudo systemctl enable docker
-    sudo usermod -aG docker ec2-user
-else
-    echo "Docker is already installed"
-fi
-
-# Pull the Docker image
-echo "Pulling Docker image: ${FRONTEND_IMAGE}"
-sudo docker pull ${FRONTEND_IMAGE}
-
-# Stop and remove existing container if it exists
-echo "Stopping any existing container..."
-sudo docker stop lms-frontend || true
-sudo docker rm lms-frontend || true
-
-# Run the new container
-echo "Starting new container..."
-sudo docker run -d --name lms-frontend -p 80:80 --restart unless-stopped ${FRONTEND_IMAGE}
-
-# Verify the container is running
-echo "Verifying container is running..."
-sudo docker ps | grep lms-frontend
-
-echo "Deployment completed successfully!"
-EOF
-            
-            # Make the script executable
-            chmod +x deploy-script.sh
-            
-            # Directly SSH into the EC2 instance and run the deploy script
-            echo "Connecting to EC2 instance and running deployment script..."
-            ssh -i ssh_key ec2-user@${EC2_DNS} 'bash -s' < deploy-script.sh
+            // Run Ansible playbook to deploy the application
+            sh """
+                ansible-playbook -i ansible/inventory ansible/deploy.yml
+            """
             
             echo "Deployment completed successfully!"
-            echo "Application is now available at: http://${EC2_DNS}"
-        '''
+            echo "Application is available at: http://${ec2Dns}"
+        }
     }
 }
     }
