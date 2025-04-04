@@ -9,7 +9,7 @@ pipeline {
         EC2_USER = "ec2-user"
         EC2_DNS = "ec2-13-218-208-239.compute-1.amazonaws.com"
         EC2_INSTANCE_ID = "i-065a1c89b95538cbb"
-        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
+    
         
         // Path to the PEM file for EC2 access (ensure it’s the correct path)
         EC2_SSH_KEY_PATH = '/Users/your-username/Downloads/lms-key-pair.pem'  // Replace 'your-username' with your actual username
