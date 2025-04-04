@@ -10,7 +10,7 @@ pipeline {
         EC2_USER = "ec2-user"
         EC2_DNS = "ec2-13-218-208-239.compute-1.amazonaws.com"
         EC2_INSTANCE_ID = "i-065a1c89b95538cbb"
-        EC2_SSH_KEY_PATH = '/Users/mohammedfareesmohammedrifath/Downloads/lms-key-pair.pem' // Your .pem file path
+        EC2_SSH_KEY_PATH = '/Users/your-username/Downloads/lms-key-pair.pem' // Your .pem file path
         EC2_INSTANCE_IP = '54.172.172.181'  // Specify your EC2 instance IP
         KEY_PAIR_NAME = 'lms-key-pair'  // The name of your EC2 key pair
     }
@@ -91,14 +91,33 @@ pipeline {
                         }
                     }' > nginx/conf.d/default.conf
                     
+                    # Copy the PEM file to the workspace if it exists
+                    if [ -f "${EC2_SSH_KEY_PATH}" ]; then
+                        echo "Copying PEM file to workspace..."
+                        cp "${EC2_SSH_KEY_PATH}" ./lms-key-pair.pem
+                        chmod 400 ./lms-key-pair.pem
+                    else
+                        echo "WARNING: PEM file not found at ${EC2_SSH_KEY_PATH}"
+                        # Generate a new key pair for AWS deployment
+                        echo "Generating a new SSH key pair..."
+                        ssh-keygen -t rsa -b 2048 -f lms-key-pair -N "" -q
+                        chmod 400 lms-key-pair
+                    fi
+                    
+                    # Extract the public key from the PEM file if it exists
+                    if [ -f "lms-key-pair.pem" ]; then
+                        ssh-keygen -y -f lms-key-pair.pem > lms-key-pair.pub || {
+                            echo "Failed to extract public key from PEM file. Generating new key pair..."
+                            ssh-keygen -t rsa -b 2048 -f lms-key-pair -N "" -q
+                            chmod 400 lms-key-pair
+                        }
+                    fi
+                    
                     # Create Terraform directory
                     mkdir -p terraform
                     
-                    # Copy the PEM file to the workspace and set permissions
-                    # (skipping ssh-keygen since we'll use existing .pem file)
-                    
-                    # Create main.tf with existing key pair
-                    cat > terraform/main.tf <<'EOF'
+                    # Create main.tf - using public key for key_pair creation
+                    cat > terraform/main.tf <<EOF
 provider "aws" {
   region = var.aws_region
 }
@@ -144,15 +163,15 @@ resource "aws_security_group" "lms_frontend_sg" {
   }
 }
 
-# Using existing key pair instead of creating new one
-data "aws_key_pair" "existing_key_pair" {
-  key_name = "lms-key-pair"
+resource "aws_key_pair" "lms_key_pair" {
+  key_name   = "lms-key-pair"
+  public_key = file("\${path.module}/../lms-key-pair.pub")
 }
 
 resource "aws_instance" "lms_frontend" {
   ami                    = var.instance_ami
   instance_type          = var.instance_type
-  key_name               = data.aws_key_pair.existing_key_pair.key_name
+  key_name               = aws_key_pair.lms_key_pair.key_name
   vpc_security_group_ids = [aws_security_group.lms_frontend_sg.id]
 
   user_data = <<-EOF
@@ -346,14 +365,6 @@ EOF
         stage('Deploy with PEM File') {
             steps {
                 sh '''
-                    # Copy PEM file to workspace (if needed)
-                    if [ ! -f "lms-key-pair.pem" ]; then
-                        cp "${EC2_SSH_KEY_PATH}" lms-key-pair.pem || echo "Warning: Could not copy PEM file"
-                    fi
-                    
-                    # Set permissions on PEM file
-                    chmod 400 lms-key-pair.pem
-                    
                     # Load EC2 info from properties file
                     source ec2_info.properties
                     
@@ -410,9 +421,22 @@ EOF
                     # Make the script executable
                     chmod +x deploy-script.sh
                     
-                    # Directly SSH into the EC2 instance using the PEM file and run the deploy script
-                    echo "Connecting to EC2 instance using PEM file and running deployment script..."
-                    ssh -i lms-key-pair.pem -o StrictHostKeyChecking=no ec2-user@${EC2_DNS} 'bash -s' < deploy-script.sh
+                    # Determine which key file to use
+                    if [ -f lms-key-pair.pem ]; then
+                        KEY_FILE="lms-key-pair.pem"
+                    elif [ -f lms-key-pair ]; then
+                        KEY_FILE="lms-key-pair"
+                    else
+                        echo "ERROR: Neither lms-key-pair.pem nor lms-key-pair private key found"
+                        exit 1
+                    fi
+                    
+                    echo "Using key file: $KEY_FILE for SSH access"
+                    chmod 400 $KEY_FILE
+                    
+                    # Directly SSH into the EC2 instance using the key file and run the deploy script
+                    echo "Connecting to EC2 instance and running deployment script..."
+                    ssh -i $KEY_FILE -o StrictHostKeyChecking=no ec2-user@${EC2_DNS} 'bash -s' < deploy-script.sh
                     
                     echo "Deployment completed successfully!"
                     echo "Application is now available at: http://${EC2_DNS}"
@@ -423,7 +447,7 @@ EOF
     
     post {
         always {
-            archiveArtifacts artifacts: 'lms-key-pair.pem, ec2_info.properties, terraform_output.json, deploy-script.sh', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'lms-key-pair.pem, lms-key-pair, lms-key-pair.pub, ec2_info.properties, terraform_output.json, deploy-script.sh', allowEmptyArchive: true
         }
         
         success {
