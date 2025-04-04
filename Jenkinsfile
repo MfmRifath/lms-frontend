@@ -8,7 +8,7 @@ pipeline {
         FRONTEND_IMAGE = 'rifathmfm/lms-frontend:latest'
         PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env.PATH}"
         TF_VAR_public_key_path = "${env.WORKSPACE}/ssh_key.pub"
-        EC2_USER = "s2oadmin"
+        EC2_USER = "ec2-user"
     }
     
     stages {
@@ -157,7 +157,7 @@ resource "aws_key_pair" "lms_key_pair" {
 }
 
 resource "aws_instance" "lms_frontend" {
-  ami                    = var.instance_ami
+  ami                    = var.instance_ami  # Make sure this is the Ubuntu AMI
   instance_type          = var.instance_type
   key_name               = aws_key_pair.lms_key_pair.key_name
   vpc_security_group_ids = [aws_security_group.lms_frontend_sg.id]
@@ -165,11 +165,11 @@ resource "aws_instance" "lms_frontend" {
   user_data = <<-EOF
               #!/bin/bash
               # Update and install Docker
-              yum update -y
-              amazon-linux-extras install docker -y
-              service docker start
+              apt-get update -y
+              apt-get install docker.io -y
+              systemctl start docker
               systemctl enable docker
-              usermod -a -G docker ec2-user
+              usermod -aG docker ubuntu
               
               # Signal that the instance is ready by creating a file
               touch /tmp/instance-ready
