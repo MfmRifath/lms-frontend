@@ -8,7 +8,7 @@ pipeline {
         FRONTEND_IMAGE = 'rifathmfm/lms-frontend:latest'
         PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env.PATH}"
         TF_VAR_public_key_path = "${env.WORKSPACE}/ssh_key.pub"
-        EC2_USER = "ec2-user"
+        EC2_USER = "s2oadmin"
     }
     
     stages {
