@@ -9,7 +9,7 @@ pipeline {
         PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env.PATH}"
         TF_VAR_public_key_path = "${env.WORKSPACE}/terraform/ssh_key.pub"
         EC2_USER = "ubuntu"
-        SSH_CREDS_ID = "s2oadmin" // SSH key credential ID from your Jenkins
+        SSH_CREDS_ID = "aws-ssh-key" // Correct credential ID from Jenkins
     }
     
     stages {
@@ -242,15 +242,12 @@ output "ec2_instance_id" {
 }
 EOF
 
-                    # Make sure ansible directory exists and is clean
-                    rm -rf ansible
+                    # Create Ansible inventory and playbooks
                     mkdir -p ansible
-                    
-                    # Create Ansible inventory template file (will be populated later)
                     echo '[frontend]' > ansible/inventory
                     echo '# Will be populated with actual EC2 DNS during deployment' >> ansible/inventory
 
-                    # Create Ansible playbook for Docker installation (updated for Ubuntu)
+                    # Create Ansible playbooks (docker.yml and deploy.yml)
                     cat > ansible/docker.yml <<'EOF'
 ---
 - name: Install Docker on EC2 instance
@@ -298,7 +295,6 @@ EOF
         append: yes
 EOF
 
-                    # Create Ansible playbook for application deployment
                     cat > ansible/deploy.yml <<'EOF'
 ---
 - name: Deploy LMS frontend application
@@ -340,7 +336,7 @@ EOF
         msg: "Application is {{ 'running' if app_status.status == 200 else 'not running' }}"
 EOF
 
-                    # Create deployment script for manual deployment option
+                    # Create deployment script
                     cat > deploy-script.sh <<'EOF'
 #!/bin/bash
 # Script to deploy the LMS frontend to EC2 instance
