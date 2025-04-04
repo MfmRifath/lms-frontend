@@ -494,55 +494,44 @@ EOF
         }
         
         stage('Deploy with Ansible') {
-    steps {
-        script {
-            // Load EC2 info from the properties file
-            def ec2Info = readProperties file: 'ec2_info.properties'
-            def ec2Dns = ec2Info['EC2_DNS']
-
-            // Update the Ansible inventory with the correct EC2 DNS
-            sh """
-                sed -i '' 's/\${EC2_DNS}/${ec2Dns}/g' ansible/inventory
-            """
-            
-            // Print the inventory for debugging
-            echo "Ansible inventory contents:"
-            sh 'cat ansible/inventory'
-            
-            // Wait for EC2 instance to be ready for SSH
-            echo "Waiting for EC2 instance to be ready..."
-            for (int i = 1; i <= 30; i++) {
-                def sshCommand = "ssh -i ssh_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 ec2-user@${ec2Dns} 'echo Instance is ready'"
-                try {
-                    sh(script: sshCommand, returnStatus: true)
-                    echo "SSH connection successful"
-                    break
-                } catch (Exception e) {
-                    if (i == 30) {
-                        error "EC2 instance not ready after 30 attempts"
-                    }
-                    echo "Attempt $i: Waiting for SSH to be available..."
-                    sleep(time: 10, unit: 'SECONDS')
-                }
+            steps {
+                sh '''
+                    # Load EC2 info from properties file
+                    source ec2_info.properties
+                    
+                    # Update the Ansible inventory with the correct EC2 DNS
+                    sh """
+                        sed -i '' 's/\${EC2_DNS}/${ec2Dns}/g' ansible/inventory
+                        """
+                    
+                    # Print the inventory for debugging
+                    echo "Ansible inventory contents:"
+                    sh 'cat ansible/inventory'
+                    
+                    # Wait for EC2 instance to be ready for SSH
+                    echo "Waiting for EC2 instance to be ready..."
+                    for i in {1..30}; do
+                        if ssh -i ssh_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 ec2-user@${EC2_DNS} "echo Instance is ready"; then
+                            echo "SSH connection successful"
+                            break
+                        fi
+                        echo "Attempt $i: Waiting for SSH to be available..."
+                        sleep 10
+                    done
+                    
+                    # Run Ansible playbook to install Docker
+                    echo "Installing Docker on EC2 instance..."
+                    ansible-playbook -i ansible/inventory ansible/docker.yml
+                    
+                    # Run Ansible playbook to deploy the application
+                    echo "Deploying application with Ansible..."
+                    ansible-playbook -i ansible/inventory ansible/deploy.yml
+                    
+                    echo "Deployment completed successfully!"
+                    echo "Application is available at: http://${EC2_DNS}"
+                '''
             }
-            
-            // Run Ansible playbook to install Docker
-            echo "Installing Docker on EC2 instance..."
-            sh """
-                ansible-playbook -i ansible/inventory ansible/docker.yml
-            """
-            
-            // Run Ansible playbook to deploy the application
-            echo "Deploying application with Ansible..."
-            sh """
-                ansible-playbook -i ansible/inventory ansible/deploy.yml
-            """
-            
-            echo "Deployment completed successfully!"
-            echo "Application is available at: http://${ec2Dns}"
         }
-    }
-}
     }
     
     post {
