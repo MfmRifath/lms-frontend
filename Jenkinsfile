@@ -350,28 +350,28 @@ EOF
 [ec2_instances]
 ${EC2_DNS} ansible_user=${EC2_USER} ansible_ssh_private_key_file=${WORKSPACE}/ssh_key ansible_connection=ssh
 [ec2_instances:vars]
-ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPersist=60s -o ConnectTimeout=30 -o ConnectionAttempts=20'
+ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPersist=60s -o ConnectTimeout=60 -o ConnectionAttempts=30'
 EOF
                     
                     echo "Ansible inventory created:"
                     cat ansible/inventory/hosts
                     
-                    # Create ansible.cfg
+                    # Create ansible.cfg with increased timeouts
                     cat > ansible/ansible.cfg <<EOF
 [defaults]
 host_key_checking = False
-timeout = 120
+timeout = 180
 retry_files_enabled = False
 stdout_callback = yaml
 interpreter_python = auto_silent
 
 [ssh_connection]
-ssh_args = -o ControlMaster=auto -o ControlPersist=60s -o ConnectTimeout=60 -o ConnectionAttempts=20
+ssh_args = -o ControlMaster=auto -o ControlPersist=60s -o ConnectTimeout=60 -o ConnectionAttempts=30
 pipelining = True
-retries = 10
+retries = 15
 EOF
                     
-                    # Create Ansible playbook for deployment
+                    # Create Ansible playbook for deployment with increased wait times
                     cat > ansible/deploy.yml <<EOF
 ---
 - name: Wait for EC2 instance and deploy LMS Frontend
@@ -384,10 +384,10 @@ EOF
   tasks:
     - name: Wait for SSH connection
       wait_for_connection:
-        delay: 10
-        timeout: 600
+        delay: 15
+        timeout: 900
         connect_timeout: 60
-        sleep: 15
+        sleep: 30
       retries: 30
       delay: 30
     
