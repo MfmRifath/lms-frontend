@@ -1,10 +1,6 @@
 pipeline {
     agent any
     
-    parameters {
-        booleanParam(name: 'CLEANUP_OLD_RESOURCES', defaultValue: false, description: 'Clean up resources from previous runs')
-    }
-    
     environment {
         DOCKER_HUB_CREDS = credentials('docker-registry-credentials')
         AWS_ACCESS_KEY_ID = credentials('aws-access-key-id')
@@ -16,42 +12,6 @@ pipeline {
     }
     
     stages {
-        stage('Cleanup Old Resources') {
-            when {
-                expression { return params.CLEANUP_OLD_RESOURCES == true }
-            }
-            steps {
-                sh '''
-                    cd terraform || mkdir -p terraform && cd terraform
-                    
-                    # List all EC2 instances with our deployment tags
-                    echo "Listing all EC2 instances from previous deployments..."
-                    aws ec2 describe-instances \
-                      --filters "Name=tag-key,Values=Name" "Name=tag-value,Values=lms-frontend-instance-*" \
-                      --query "Reservations[*].Instances[*].{InstanceId:InstanceId,Name:Tags[?Key=='Name']|[0].Value,State:State.Name}" \
-                      --output table || echo "Failed to list instances, continuing..."
-                    
-                    # List security groups
-                    echo "Listing security groups from previous deployments..."
-                    aws ec2 describe-security-groups \
-                      --filters "Name=group-name,Values=lms-frontend-sg-*" \
-                      --query "SecurityGroups[*].{GroupId:GroupId,GroupName:GroupName}" \
-                      --output table || echo "Failed to list security groups, continuing..."
-                    
-                    # List key pairs
-                    echo "Listing key pairs from previous deployments..."
-                    aws ec2 describe-key-pairs \
-                      --filters "Name=key-name,Values=lms-key-pair-*" \
-                      --query "KeyPairs[*].{KeyName:KeyName}" \
-                      --output table || echo "Failed to list key pairs, continuing..."
-                    
-                    echo "WARNING: This is a placeholder for cleanup logic."
-                    echo "In a production environment, implement proper cleanup logic here."
-                    echo "Manual cleanup may be required for now."
-                '''
-            }
-        }
-        
         stage('Checkout') {
             steps {
                 checkout scm
@@ -140,21 +100,15 @@ pipeline {
                     # Create Terraform directory
                     mkdir -p terraform
                     
-                    # Create main.tf with unique resource names
+                    # Create main.tf
                     cat > terraform/main.tf <<'EOF'
 provider "aws" {
   region = var.aws_region
 }
 
-# Use a timestamp to ensure unique resource names
-locals {
-  timestamp = formatdate("YYYYMMDD-hhmmss", timestamp())
-  name_suffix = "${var.resource_name_prefix}-${local.timestamp}"
-}
-
 resource "aws_security_group" "lms_frontend_sg" {
-  name        = "lms-frontend-sg-${local.name_suffix}"
-  description = "Security group for LMS Frontend (${local.timestamp})"
+  name        = "lms-frontend-sg"
+  description = "Security group for LMS Frontend"
 
   ingress {
     from_port   = 22
@@ -195,20 +149,13 @@ resource "aws_security_group" "lms_frontend_sg" {
   }
 
   tags = {
-    Name = "lms-frontend-sg-${local.name_suffix}"
-    CreatedBy = "jenkins"
-    Timestamp = local.timestamp
+    Name = "lms-frontend-sg"
   }
 }
 
 resource "aws_key_pair" "lms_key_pair" {
-  key_name   = "lms-key-pair-${local.name_suffix}"
+  key_name   = "lms-key-pair"
   public_key = file(var.public_key_path)
-  
-  tags = {
-    CreatedBy = "jenkins"
-    Timestamp = local.timestamp
-  }
 }
 
 resource "aws_instance" "lms_frontend" {
@@ -229,17 +176,19 @@ resource "aws_instance" "lms_frontend" {
               # Make sure SSH is running and properly configured
               systemctl restart ssh
               
-              # Log initialization
-              echo "$(date): Instance initialization complete" > /var/log/user-data.log
+              # Make sure the ubuntu user is authorized to use the SSH key
+              mkdir -p /home/ubuntu/.ssh
+              chmod 700 /home/ubuntu/.ssh
+              
+              # Log the instance startup completion
+              echo "$(date): Instance initialization complete" >> /var/log/user-data.log
               
               # Signal that the instance is ready by creating a file
               touch /tmp/instance-ready
               EOF
 
   tags = {
-    Name = "lms-frontend-instance-${local.name_suffix}"
-    CreatedBy = "jenkins"
-    Timestamp = local.timestamp
+    Name = "lms-frontend-instance"
   }
 }
 EOF
@@ -268,12 +217,6 @@ variable "public_key_path" {
   description = "Path to the public key for SSH access"
   type        = string
 }
-
-variable "resource_name_prefix" {
-  description = "Prefix to add to resource names for uniqueness"
-  type        = string
-  default     = "deploy"
-}
 EOF
 
                     # Create outputs.tf
@@ -291,16 +234,6 @@ output "ec2_instance_dns" {
 output "ec2_instance_id" {
   description = "ID of the EC2 instance"
   value       = aws_instance.lms_frontend.id
-}
-
-output "security_group_id" {
-  description = "ID of the created security group"
-  value       = aws_security_group.lms_frontend_sg.id
-}
-
-output "key_pair_name" {
-  description = "Name of the created key pair"
-  value       = aws_key_pair.lms_key_pair.key_name
 }
 EOF
 
@@ -561,17 +494,11 @@ EOF
                 sh '''
                     cd terraform
                     
-                    # Set a unique build identifier using Jenkins BUILD_NUMBER
-                    UNIQUE_PREFIX="deploy-${BUILD_NUMBER}"
-                    echo "Using unique resource prefix: ${UNIQUE_PREFIX}"
-                    
                     # Initialize Terraform
                     terraform init
                     
-                    # Plan the deployment with unique name prefix
-                    terraform plan -out=tfplan \
-                        -var "public_key_path=${TF_VAR_public_key_path}" \
-                        -var "resource_name_prefix=${UNIQUE_PREFIX}"
+                    # Plan the deployment
+                    terraform plan -out=tfplan -var "public_key_path=${TF_VAR_public_key_path}"
                     
                     # Apply the Terraform configuration
                     terraform apply -auto-approve tfplan
@@ -583,15 +510,10 @@ EOF
                     EC2_DNS=$(terraform output -raw ec2_instance_dns)
                     EC2_IP=$(terraform output -raw ec2_instance_ip)
                     EC2_INSTANCE_ID=$(terraform output -raw ec2_instance_id)
-                    SG_ID=$(terraform output -raw security_group_id)
-                    KEY_NAME=$(terraform output -raw key_pair_name)
                     
                     echo "EC2_DNS=${EC2_DNS}" > ../ec2_info.properties
                     echo "EC2_IP=${EC2_IP}" >> ../ec2_info.properties
                     echo "EC2_INSTANCE_ID=${EC2_INSTANCE_ID}" >> ../ec2_info.properties
-                    echo "SECURITY_GROUP_ID=${SG_ID}" >> ../ec2_info.properties
-                    echo "KEY_PAIR_NAME=${KEY_NAME}" >> ../ec2_info.properties
-                    echo "RESOURCE_PREFIX=${UNIQUE_PREFIX}" >> ../ec2_info.properties
                     
                     echo "EC2 Instance provisioned at: ${EC2_DNS}"
                     echo "EC2 Instance ID: ${EC2_INSTANCE_ID}"
@@ -678,7 +600,6 @@ EOF
                 EC2 Instance DNS: ${EC2_DNS:-Not Available}
                 EC2 Instance IP: ${EC2_IP:-Not Available}
                 Application URL: http://${EC2_DNS:-Not Available}
-                Resource Prefix: ${RESOURCE_PREFIX:-Not Available}
                 =======================================
                 """
             '''
