@@ -3,6 +3,9 @@ pipeline {
     
     parameters {
         booleanParam(name: 'CLEANUP_OLD_RESOURCES', defaultValue: false, description: 'Clean up resources from previous runs')
+        string(name: 'NEW_USER', defaultValue: 'appuser', description: 'Username for the new system user')
+        password(name: 'NEW_USER_PASSWORD', defaultValue: '', description: 'Password for the new system user (leave empty for SSH-only access)')
+        booleanParam(name: 'SUDO_ACCESS', defaultValue: true, description: 'Grant sudo access to the new user')
     }
     
     environment {
@@ -13,6 +16,7 @@ pipeline {
         PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env.PATH}"
         TF_VAR_public_key_path = "${env.WORKSPACE}/ssh_key.pub"
         EC2_USER = "ubuntu"
+        NEW_USER_HOME = "/home/${params.NEW_USER}"
     }
     
     stages {
@@ -137,6 +141,13 @@ pipeline {
                     echo "Generated public key:"
                     cat ssh_key.pub
                     
+                    # Generate a second SSH key pair for the new user
+                    rm -f new_user_key new_user_key.pub
+                    ssh-keygen -t rsa -b 2048 -f new_user_key -N "" -q
+                    chmod 400 new_user_key
+                    echo "Generated new user public key:"
+                    cat new_user_key.pub
+                    
                     # Create Terraform directory
                     mkdir -p terraform
                     
@@ -225,6 +236,16 @@ resource "aws_instance" "lms_frontend" {
               systemctl start docker
               systemctl enable docker
               usermod -aG docker ubuntu
+              
+              # Improve SSH security setup
+              mkdir -p /home/ubuntu/.ssh
+              chmod 700 /home/ubuntu/.ssh
+              cp /home/ubuntu/.ssh/authorized_keys /home/ubuntu/.ssh/authorized_keys.bak || echo "No authorized_keys to backup"
+              
+              # Ensure the authorized_keys file has proper permissions
+              chmod 600 /home/ubuntu/.ssh/authorized_keys
+              chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
+              chown -R ubuntu:ubuntu /home/ubuntu/.ssh
               
               # Make sure SSH is running and properly configured
               systemctl restart ssh
@@ -358,6 +379,83 @@ EOF
         name: ubuntu
         groups: docker
         append: yes
+EOF
+
+                    # Create Ansible playbook for user creation
+                    cat > ansible/create_user.yml <<'EOF'
+---
+- name: Create new user with proper permissions
+  hosts: frontend
+  become: yes
+  vars:
+    new_username: "{{ lookup('env', 'NEW_USER') }}"
+    new_user_password: "{{ lookup('env', 'NEW_USER_PASSWORD') }}"
+    sudo_access: "{{ lookup('env', 'SUDO_ACCESS') | bool }}"
+    new_user_home: "{{ lookup('env', 'NEW_USER_HOME') }}"
+  
+  tasks:
+    - name: Create the new user
+      user:
+        name: "{{ new_username }}"
+        state: present
+        shell: /bin/bash
+        createhome: yes
+        home: "{{ new_user_home }}"
+        generate_ssh_key: no
+        
+    - name: Set password for the new user (if provided)
+      user:
+        name: "{{ new_username }}"
+        password: "{{ new_user_password | password_hash('sha512') }}"
+      when: new_user_password != ""
+    
+    - name: Create .ssh directory for the new user
+      file:
+        path: "{{ new_user_home }}/.ssh"
+        state: directory
+        mode: '0700'
+        owner: "{{ new_username }}"
+        group: "{{ new_username }}"
+    
+    - name: Create authorized_keys file for the new user
+      copy:
+        src: ../new_user_key.pub
+        dest: "{{ new_user_home }}/.ssh/authorized_keys"
+        mode: '0600'
+        owner: "{{ new_username }}"
+        group: "{{ new_username }}"
+        remote_src: no
+    
+    - name: Add to sudo group if requested
+      user:
+        name: "{{ new_username }}"
+        groups: sudo
+        append: yes
+      when: sudo_access
+    
+    - name: Create sudoers file for the new user
+      copy:
+        content: "{{ new_username }} ALL=(ALL) NOPASSWD:ALL"
+        dest: "/etc/sudoers.d/{{ new_username }}"
+        mode: '0440'
+        owner: root
+        group: root
+        validate: 'visudo -cf %s'
+      when: sudo_access
+    
+    - name: Add new user to docker group
+      user:
+        name: "{{ new_username }}"
+        groups: docker
+        append: yes
+        
+    - name: Verify user creation
+      command: id "{{ new_username }}"
+      register: id_output
+      
+    - name: Display user information
+      debug:
+        msg: "{{ id_output.stdout }}"
 EOF
 
                     # Create Ansible playbook for application deployment
@@ -597,8 +695,8 @@ EOF
                     echo "EC2 Instance ID: ${EC2_INSTANCE_ID}"
                     
                     # Wait for instance to initialize before proceeding
-                    echo "Waiting for instance initialization (2 minutes)..."
-                    sleep 120
+                    echo "Waiting for instance initialization (3 minutes)..."
+                    sleep 180
                 '''
             }
         }
@@ -609,27 +707,25 @@ EOF
                     # Load EC2 info from properties file
                     source ec2_info.properties
                     
-                    # Create a new inventory file with the correct EC2 DNS
+                    # Ensure SSH key has correct permissions
+                    chmod 400 ssh_key
+                    chmod 400 new_user_key
+                    ls -la ssh_key new_user_key
+                    
+                    # Create a new inventory file with the correct EC2 DNS and better SSH params
                     echo "[frontend]" > ansible/inventory
-                    echo "ec2_host ansible_host=${EC2_DNS} ansible_user=${EC2_USER} ansible_ssh_private_key_file=../ssh_key ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> ansible/inventory
+                    echo "ec2_host ansible_host=${EC2_DNS} ansible_user=${EC2_USER} ansible_ssh_private_key_file=$(pwd)/ssh_key ansible_ssh_common_args='-o StrictHostKeyChecking=no -o ConnectionAttempts=10 -o ConnectTimeout=30'" >> ansible/inventory
                     
                     # Print the inventory for debugging
                     echo "Ansible inventory contents:"
                     cat ansible/inventory
                     
-                    # Verify SSH key permissions
-                    echo "Verifying SSH key permissions:"
-                    ls -la ssh_key
-                    
-                    # Test SSH connection with verbose output for debugging
-                    echo "Testing SSH connection with verbose output:"
-                    ssh -v -i ssh_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${EC2_USER}@${EC2_DNS} "echo SSH connection test" || echo "SSH test failed but continuing..."
-                    
-                    # Wait with longer timeouts and more attempts
+                    # Wait with longer timeouts and more patience
                     echo "Waiting for EC2 instance to be ready for SSH..."
-                    MAX_ATTEMPTS=20
+                    MAX_ATTEMPTS=30
+                    ATTEMPT_DELAY=20
                     for i in $(seq 1 $MAX_ATTEMPTS); do
-                        if ssh -i ssh_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 ${EC2_USER}@${EC2_DNS} "echo Instance is ready"; then
+                        if ssh -i ssh_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ConnectionAttempts=3 ${EC2_USER}@${EC2_DNS} "echo Instance is ready"; then
                             echo "SSH connection successful on attempt $i"
                             break
                         fi
@@ -640,19 +736,99 @@ EOF
                         fi
                         
                         echo "Attempt $i of $MAX_ATTEMPTS: Waiting for SSH to be available..."
-                        sleep 15
+                        sleep $ATTEMPT_DELAY
                     done
                     
-                    # Run Ansible with verbose output for debugging
+                    # Run Ansible with better SSH settings
                     echo "Running Ansible playbook with verbose output..."
-                    ANSIBLE_DEBUG=1 ansible-playbook -vvv -i ansible/inventory ansible/docker.yml
+                    ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -vvv -i ansible/inventory ansible/docker.yml
                     
                     # Deploy the application with Ansible
                     echo "Deploying application with Ansible..."
-                    ansible-playbook -i ansible/inventory ansible/deploy.yml
+                    ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i ansible/inventory ansible/deploy.yml
                     
                     echo "Deployment completed successfully!"
                     echo "Application is available at: http://${EC2_DNS}"
+                '''
+            }
+        }
+        
+        stage('Create New User') {
+            steps {
+                sh '''
+                    # Load EC2 info from properties file
+                    source ec2_info.properties
+                    
+                    echo "Creating new user: ${NEW_USER} with sudo access: ${SUDO_ACCESS}"
+                    
+                    # Export variables for Ansible
+                    export NEW_USER_PASSWORD=${NEW_USER_PASSWORD}
+                    export SUDO_ACCESS=${SUDO_ACCESS}
+                    
+                    # Create the new user with Ansible
+                    ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -vvv -i ansible/inventory ansible/create_user.yml
+                    
+                    # Test SSH access with the new user
+                    echo "Testing SSH access for the new user..."
+                    if ssh -i new_user_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ConnectionAttempts=3 ${NEW_USER}@${EC2_DNS} "echo 'New user SSH connection successful'; id"; then
+                        echo "✅ New user SSH access verified successfully!"
+                    else
+                        echo "⚠️ Could not verify new user SSH access, but continuing deployment..."
+                    fi
+                    
+                    # Save new user access information
+                    echo "NEW_USER=${NEW_USER}" >> ec2_info.properties
+                    echo "NEW_USER_KEY_PATH=$(pwd)/new_user_key" >> ec2_info.properties
+                    
+                    # Create a useful info file for the new user
+                    cat > new_user_access_info.txt <<EOF
+=================================
+NEW USER ACCESS INFORMATION
+=================================
+Server: ${EC2_DNS}
+Username: ${NEW_USER}
+Private Key: new_user_key (in Jenkins workspace)
+Sudo Access: ${SUDO_ACCESS}
+
+To connect:
+ssh -i new_user_key ${NEW_USER}@${EC2_DNS}
+
+Application URL: http://${EC2_DNS}
+=================================
+EOF
+                '''
+                
+                // Archive the new user credentials separately for security
+                archiveArtifacts artifacts: 'new_user_key, new_user_key.pub, new_user_access_info.txt', fingerprint: true, onlyIfSuccessful: true
+            }
+        }
+        
+        stage('Verify Deployment') {
+            steps {
+                sh '''
+                    # Load EC2 info from properties file
+                    source ec2_info.properties
+                    
+                    # Verify application is running
+                    echo "Verifying application deployment..."
+                    if curl -s -o /dev/null -w "%{http_code}" http://${EC2_DNS}/ | grep -q "200"; then
+                        echo "✅ Application is running successfully!"
+                    else
+                        echo "⚠️ Could not verify application is running properly."
+                    fi
+                    
+                    # Check Docker container status
+                    echo "Checking Docker container status..."
+                    ssh -i ssh_key -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_DNS} "sudo docker ps -a"
+                    
+                    # Check as new user if applicable
+                    if [ -f new_user_key ]; then
+                        echo "Verifying new user permissions..."
+                        ssh -i new_user_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${NEW_USER}@${EC2_DNS} "
+                            echo 'Checking sudo access:' && sudo echo 'Sudo access: SUCCESSFUL' || echo 'Sudo access: FAILED';
+                            echo 'Checking Docker access:' && docker ps -a && echo 'Docker access: SUCCESSFUL' || echo 'Docker access: FAILED';
+                        " || echo "Could not verify new user permissions"
+                    fi
                 '''
             }
         }
@@ -679,6 +855,9 @@ EOF
                 EC2 Instance IP: ${EC2_IP:-Not Available}
                 Application URL: http://${EC2_DNS:-Not Available}
                 Resource Prefix: ${RESOURCE_PREFIX:-Not Available}
+                
+                New User: ${NEW_USER:-Not Created}
+                New User SSH Key: new_user_key
                 =======================================
                 """
             '''
