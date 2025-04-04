@@ -500,13 +500,11 @@ EOF
                     source ec2_info.properties
                     
                     # Update the Ansible inventory with the correct EC2 DNS
-                    sh """
-                        sed -i '' 's/\${EC2_DNS}/${ec2Dns}/g' ansible/inventory
-                        """
+                    sed -i "" "s/\${EC2_DNS}/${ec2Dns}/g" ansible/inventory
                     
                     # Print the inventory for debugging
                     echo "Ansible inventory contents:"
-                    sh 'cat ansible/inventory'
+                    cat ansible/inventory
                     
                     # Wait for EC2 instance to be ready for SSH
                     echo "Waiting for EC2 instance to be ready..."
